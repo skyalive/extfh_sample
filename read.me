@@ -1,0 +1,30 @@
+本ディレクトリは、ローカルで開発されるプロジェクト向けのZig共通ライブラリを開発するフォルダである。
+ローカルで開発を行うZigのビルドツールは、本リポジトリからインポートしてローカルで開発されるモジュールに取り込まれる
+
+1.共通プロジェクトルール
+  1.開発手法
+    - GitHub製のSpec Kitで仕様駆動開発を行うこと。specは/spacディレクトリに保存する。また、実装と乖離のないように、機能追加後updateを行う。
+    - 実装はテスト駆動開発(t-wada氏のtdd)に沿って行うこと。
+    - まず、Planとtodoを作成し、セッション起動時に確認し、todo項目消化後、セッション終了前にupdateを行う。
+    - 開発は、macos上ではなく、podmanにubuntu25.10の環境を作成し、テストを行う。
+    - ドキュメント、ソースコメント、コミットメッセージは英語で、プロンプトでの会話は日本語で行う。
+
+2.開発プロジェクト
+2.1.extfh開発
+    - 目的 各プロジェクトでインポートするzigの共通ライブラリ
+開発ディレクトリ /extfh
+
+3.Podman（Ubuntu Linux）テスト環境
+  - イメージ作成:
+    - `./container/podman-build.sh`
+    - Zig パッケージは `repo/zig-aarch64-linux-0.15.2` を使用
+    - 別パスを使う場合: `ZIG_DIR=repo/zig-x86_64-linux-0.15.2 ./container/podman-build.sh`
+  - シェル起動（コンテナ内で作業）:
+    - `./container/podman-shell.sh`
+  - テスト実行（コンテナ内で `zig build test`）:
+    - `./container/podman-test.sh`
+  - COBOL サンプル実行（ビルド後に実行）:
+    - `./container/podman-cobol-sample.sh`
+  - Linux 用のビルド成果物は `.podman/zig-out-linux` に分離して保存する
+  - 備考:
+    - ベースイメージは `ubuntu:25.10` を使用。未提供の場合は `container/Containerfile` の `FROM` を更新すること。

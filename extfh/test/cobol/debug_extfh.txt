@@ -1,0 +1,15 @@
+EXTFH: Open 'testfile.isam' mode=128
+EXTFH: CWD='/work/extfh/test/cobol'
+CALL opcode bytes=250,1
+CALL opcode bytes=250,1
+MAP call_id=1 open_mode=1 rec_size=25 key_pos=0 key_size=5 fname_len=13 rec_ptr=0xaaaab03d0130 kdb_ptr=0xaaaad3451c70
+CALL opcode bytes=250,1
+MAP call_id=1 open_mode=1 rec_size=25 key_pos=0 key_size=5 fname_len=13 rec_ptr=0xaaaacb480130 kdb_ptr=0xaaaaeffd7c70
+CALL opcode bytes=250,1
+MAP call_id=1 open_mode=1 rec_size=25 key_pos=0 key_size=5 fname_len=13 rec_ptr=0xaaaada830130 kdb_ptr=0xaaaaf1699c70
+ENTER handleOpen
+CALL opcode bytes=250,1
+MAP call_id=1 open_mode=1 rec_size=25 key_pos=0 key_size=5 fname_len=13 rec_ptr=0xaaaabcee0130 kdb_ptr=0xaaaad454bc70
+ENTER handleOpen
+EXTFH: Open 'testfile.isam' mode=128
+EXTFH: CWD='/Users/uemonmac/dev/__claude/__ziglibs/extfh/test/cobol'

@@ -1,0 +1,98 @@
+⏺ GnuCOBOL の fcd3 をどのようにサマリーしたのか、実装と仕様書から説明します。                                      
+                                                                                                                   
+  FCD3 のサマリー方法                                                                                              
+                                                                                                                   
+  1. GnuCOBOL 標準 FCD3 から本質的なフィールドだけを抽出                                                           
+                                                                                                                   
+  GnuCOBOL の標準 FCD3（xfhfcd3.cpy）には多くのフィールドがありますが、実装では以下の必須フィールドだけを Zig の struct に定義しています：
+                                                                                                                   
+  抽出のロジック：                                                                                                 
+  - ✅ 制御用フィールド: call_id (操作コード), handle (ファイルハンドル), status (戻り値)                          
+  - ✅ ファイル情報: filename, file_open_mode                                                                      
+  - ✅ レコード情報: record_size, record_ptr (データポインタ)                                                      
+  - ✅ キー情報: record_key_pos, record_key_size, key_ptr, key_number                                              
+  - ✅ 読み込みモード: option (FIRST/NEXT/EQUAL/GTEQ など)                                                         
+  - ❌ 不要なもの: 予約領域、ローカル用フィールドなど                                                              
+                                                                                                                   
+  2. Operation Code (call_id) をシンプルに整理                                                                     
+                                                                                                                   
+  GnuCOBOL には多くの拡張操作がありますが、本質的な操作に絞った：                                                  
+                                                                                                                   
+  switch (fcd.call_id) {                                                                                           
+      1 => handleOpen(fcd),      // OPEN                                                                           
+      2 => handleClose(fcd),     // CLOSE                                                                          
+      3 => handleRead(fcd),      // READ                                                                           
+      4 => handleWrite(fcd),     // WRITE                                                                          
+      5 => handleRewrite(fcd),   // REWRITE (VSAM only)                                                            
+      6 => handleDelete(fcd),    // DELETE (VSAM only)                                                             
+      7 => handleStart(fcd),     // START (位置設定)                                                               
+      8 => handleAbort(fcd),     // ABORT (未実装)                                                                 
+      9 => handleCommit(fcd),    // COMMIT (未実装)                                                                
+      10 => handleUnlock(fcd),   // UNLOCK (ロック解放)                                                            
+      else => fcd.status = 9,    // Generic error                                                                  
+  }                                                                                                                
+                                                                                                                   
+  3. Status Code（返却値）を実用的にマップ                                                                         
+                                                                                                                   
+  | 値 | 意味 |                                                                                                    
+  |----|------|                                                                                                    
+  | 0 | Success |                                                                                                  
+  | 1 | File not found |                                                                                           
+  | 2 | File locked |                                                                                              
+  | 3 | Duplicate key |                                                                                            
+  | 4 | Record not found / EOF |                                                                                   
+  | 5 | I/O error |                                                                                                
+  | 9 | Generic error |                                                                                            
+                                                                                                                   
+  4. ポインタ操作を安全に扱う工夫                                                                                  
+                                                                                                                   
+  生の C ポインタを直接扱わず、型安全なスライスに変換：                                                            
+                                                                                                                   
+  // 元の FCD3 フィールド                                                                                          
+  record_ptr: [*c]u8,  // 任意のメモリ領域へのポインタ                                                             
+                                                                                                                   
+  // 安全なアクセス                                                                                                
+  const record_buf = fcd.record_ptr[0..context.record_size];                                                       
+  @memcpy(record_buf, source_data);  // バウンダリチェック付きコピー                                               
+                                                                                                                   
+  ---                                                                                                              
+  さらに進化させたアプローチ：ラッパー・フレームワーク                                                             
+                                                                                                                   
+  参考資料（参考extfhラッパー.md）から、プロジェクトではさらに LLM が仕様を誤解しないような設計 を検討しています： 
+                                                                                                                   
+  3層構造への分離                                                                                                  
+                                                                                                                   
+  Layer 1: Protocol Layer (fcd_spec.zig)                                                                           
+    ├─ FCD3 構造体 + ヘルパーメソッド                                                                              
+    └─ 不変のインターフェース                                                                                      
+                                                                                                                   
+  Layer 2: Dispatcher Layer (dispatcher.zig)                                                                       
+    ├─ czippfh() エントリポイント                                                                                  
+    ├─ Call-ID の分岐ロジック                                                                                      
+    └─ エラーハンドリング統一                                                                                      
+                                                                                                                   
+  Layer 3: Handler Layer (実装部分)                                                                                
+    ├─ open(), read(), write() など各操作                                                                          
+    └─ ビジネスロジック（VBISAM連携など）                                                                          
+                                                                                                                   
+  LLM が安全に実装できるようにする工夫                                                                             
+                                                                                                                   
+  // FCD3 にヘルパーメソッドを追加                                                                                 
+  pub fn getFilename(self: *FCD3) []const u8 {                                                                     
+      const len = std.mem.indexOfScalar(u8, &self.filename, 0) orelse self.filename.len;                           
+      return self.filename[0..len];  // 安全なスライス化                                                           
+  }                                                                                                                
+                                                                                                                   
+  // LLMはこの安全なメソッドを使うだけ                                                                             
+  pub fn open(fcd: *FCD3) !void {                                                                                  
+      const filename = fcd.getFilename();  // ❌ ポインタ操作不要                                                  
+      // ... VBISAM open 呼び出し                                                                                  
+  }                                                                                                                
+                                                                                                                   
+  ---                                                                                                              
+  つまり「サマリー」の本質は                                                                                       
+                                                                                                                   
+  1. 本質的な部分だけを抽出 → 70+ フィールドから 14 フィールドに                                                   
+  2. 操作をシンプルに分類 → Call-ID (1-10) の値付きで明確化                                                        
+  3. 不要な複雑性を隠蔽 → ディスパッチャ層で吸収                                                                   
+  4. 型安全なアクセスパターンを提供 → スライス化、ヘルパーメソッド
