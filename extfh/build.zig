@@ -22,6 +22,10 @@ pub fn build(b: *std.Build) void {
     extfh_mod.addOptions("build_options", options);
     extfh_mod.addIncludePath(b.path("include"));
 
+    if (target.result.os.tag == .linux) {
+        extfh_mod.linkSystemLibrary("cob", .{});
+    }
+
     if (backend == .vbisam or backend == .both) {
         // 1. VBISAM Module & Static Library
         const vbisam_mod = b.createModule(.{
