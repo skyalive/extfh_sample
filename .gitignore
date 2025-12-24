@@ -6,6 +6,9 @@ tmp_eof/
 opensourcecobol4j/
 extfh/demo/work/
 extfh/demo/IDXFILE
+extfh/go-vbisam/work/
+extfh/go-vbisam/*.idx
+extfh/go-vbisam/*.dat
 extfh/test/cobol/SEQFILE
 extfh/test/cobol/TESTFILE
 extfh/test/cobol/sample_app
