@@ -17,6 +17,11 @@ extern fn cob_set_exception(id: c_int) void;
 // Abstraction layer imports (ISAM backend-independent interface)
 const isam = @import("isam_interface.zig");
 const build_options = @import("build_options");
+const go_vbisam_api = @import("go_vbisam_api.zig");
+
+comptime {
+    _ = go_vbisam_api;
+}
 
 /// File organization types
 pub const FileType = enum {
