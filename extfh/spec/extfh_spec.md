@@ -6,9 +6,20 @@ EXTFH is a Zig-based implementation of the Extended File Handler interface for G
 
 The current implementation supports:
 - **VSAM KSDS (Keyed Sequenced Data Set)**: Implemented via the VBISAM library.
+- **SQLite-backed INDEXED files**: Implemented via `isam_sqlite.zig` (COBOL4J SQLite format).
 - **Line Sequential**: Implemented via standard filesystem I/O.
 
 ## Architecture
+
+### Build-time backend selection
+
+`zig build -Dbackend=<name>` selects the INDEXED backend at build time.
+
+Available options:
+- `vbisam` (default)
+- `sqlite`
+- `both` (build both backends and select at runtime by extension)
+- `none` (sequential only)
 
 The system consists of the following components:
 
@@ -16,8 +27,24 @@ The system consists of the following components:
 2.  **ISAM Interface (`isam_interface.zig`)**: A backend-agnostic abstraction layer for ISAM (Indexed Sequential Access Method) operations.
 3.  **Backends**:
     -   **VBISAM (`isam_vbisam.zig`, `vbisam.zig`)**: Wraps the `libvbisam` C library.
-    -   **SQLite (`isam_sqlite.zig`)**: (Planned/Stub) SQLite backend.
+    -   **SQLite (`isam_sqlite.zig`)**: COBOL4J 互換の SQLite backend。
 4.  **Sequential Handler**: A built-in handler in `extfh.zig` for non-indexed files.
+
+### Runtime backend selection (when built with `both`)
+
+When built with `-Dbackend=both`, EXTFH selects the indexed backend based on the resolved filename.
+
+Filename resolution order:
+1) `DD_<name>` environment variable
+2) `dd_<name>` environment variable
+3) `<name>` environment variable
+4) the original ASSIGN name
+
+Backend selection priority (after resolution):
+- **SQLite**: `.db`, `.sqlite`, `.sqlite3`
+- **VBISAM**: `.isam`, `.idx`, `.ksds`, `.vsam`
+- If only one backend is built, it is used as a fallback.
+- If both backends are built and the extension does not match either group, OPEN fails with status `5`.
 
 ## Interface
 
@@ -88,7 +115,7 @@ Defined in both current (`repo/gnucobol-osscons-patch/libcob/common.h:2473`) and
 
 ### OPEN (`OP_OPEN_*`)
 Opens a file. Detects file type based on extension or creates new one.
-- **INDEXED**: `.isam`, `.idx`, `.ksds`, `.vsam`
+- **INDEXED**: `.isam`, `.idx`, `.ksds`, `.vsam`, `.db`, `.sqlite`, `.sqlite3`
 - **SEQUENTIAL**: All others (default)
 - **INDEXED filename normalization**: if the requested name ends in `.isam`, EXTFH strips the extension
   and uses the base name for VBISAM (`{base}.dat` / `{base}.idx`).
@@ -128,6 +155,11 @@ Errors are returned via the `status` field in FCD3.
 - `4`: End of File / No Record
 - `5`: I/O Error / General Error
 - `9`: Unknown Operation
+
+Note (GnuCOBOL EOF handling):
+- When EOF occurs (status `10`), GnuCOBOL retains an exception code internally.
+- EXTFH clears the exception on successful CLOSE to prevent the runtime from
+  invoking the default error handler after EOF.
 
 ## Related Specs
 

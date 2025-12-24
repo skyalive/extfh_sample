@@ -38,7 +38,9 @@ pub const SqliteBackend = struct {
             .key_offset = 0,
             .key_size = 0,
         };
-        try self.openDb(db_path);
+        if (db_path.len > 0) {
+            try self.openDb(db_path);
+        }
         return self;
     }
 
@@ -96,19 +98,19 @@ pub const SqliteBackend = struct {
         };
 
         const sql = switch (mode) {
-            .FIRST => "SELECT key, value FROM table0 WHERE deleted = 0 ORDER BY key ASC LIMIT 1",
-            .LAST => "SELECT key, value FROM table0 WHERE deleted = 0 ORDER BY key DESC LIMIT 1",
+            .FIRST => "SELECT key, value FROM table0 ORDER BY key ASC LIMIT 1",
+            .LAST => "SELECT key, value FROM table0 ORDER BY key DESC LIMIT 1",
             .NEXT => if (self.current_key == null)
-                "SELECT key, value FROM table0 WHERE deleted = 0 ORDER BY key ASC LIMIT 1"
+                "SELECT key, value FROM table0 ORDER BY key ASC LIMIT 1"
             else
-                "SELECT key, value FROM table0 WHERE deleted = 0 AND key > ? ORDER BY key ASC LIMIT 1",
+                "SELECT key, value FROM table0 WHERE key > ? ORDER BY key ASC LIMIT 1",
             .PREVIOUS => if (self.current_key == null)
-                "SELECT key, value FROM table0 WHERE deleted = 0 ORDER BY key DESC LIMIT 1"
+                "SELECT key, value FROM table0 ORDER BY key DESC LIMIT 1"
             else
-                "SELECT key, value FROM table0 WHERE deleted = 0 AND key < ? ORDER BY key DESC LIMIT 1",
-            .EQUAL => "SELECT key, value FROM table0 WHERE deleted = 0 AND key = ?",
-            .GREATER_EQUAL => "SELECT key, value FROM table0 WHERE deleted = 0 AND key >= ? ORDER BY key ASC LIMIT 1",
-            .GREATER => "SELECT key, value FROM table0 WHERE deleted = 0 AND key > ? ORDER BY key ASC LIMIT 1",
+                "SELECT key, value FROM table0 WHERE key < ? ORDER BY key DESC LIMIT 1",
+            .EQUAL => "SELECT key, value FROM table0 WHERE key = ?",
+            .GREATER_EQUAL => "SELECT key, value FROM table0 WHERE key >= ? ORDER BY key ASC LIMIT 1",
+            .GREATER => "SELECT key, value FROM table0 WHERE key > ? ORDER BY key ASC LIMIT 1",
         };
 
         const bind_key = switch (mode) {
@@ -164,7 +166,7 @@ pub const SqliteBackend = struct {
         }
 
         const key = buffer[handle.key_offset .. handle.key_offset + handle.key_size];
-        const sql = "INSERT INTO table0 (key, value, deleted) VALUES (?, ?, 0)";
+        const sql = "INSERT INTO table0 (key, value, locked_by, process_id, locked_at) VALUES (?, ?, NULL, NULL, NULL)";
 
         var stmt: ?*sqlite3.sqlite3_stmt = null;
         var rc = sqlite3.sqlite3_prepare_v2(db, @ptrCast(sql.ptr), @intCast(sql.len), &stmt, null);
@@ -187,7 +189,7 @@ pub const SqliteBackend = struct {
         if (self.db == null or self.current_key == null) return error.IoError;
 
         const db = self.db.?;
-        const sql = "UPDATE table0 SET value = ? WHERE key = ? AND deleted = 0";
+        const sql = "UPDATE table0 SET value = ? WHERE key = ?";
 
         var stmt: ?*sqlite3.sqlite3_stmt = null;
         var rc = sqlite3.sqlite3_prepare_v2(db, @ptrCast(sql.ptr), @intCast(sql.len), &stmt, null);
@@ -205,12 +207,12 @@ pub const SqliteBackend = struct {
         if (sqlite3.sqlite3_changes(db) == 0) return error.NotFound;
     }
 
-    /// Delete current record (soft delete)
+    /// Delete current record
     pub fn delete(self: *Self, _: isam.IsamFileHandle) isam.IsamError!void {
         if (self.db == null or self.current_key == null) return error.IoError;
 
         const db = self.db.?;
-        const sql = "UPDATE table0 SET deleted = 1 WHERE key = ?";
+        const sql = "DELETE FROM table0 WHERE key = ?";
 
         var stmt: ?*sqlite3.sqlite3_stmt = null;
         var rc = sqlite3.sqlite3_prepare_v2(db, @ptrCast(sql.ptr), @intCast(sql.len), &stmt, null);
@@ -231,9 +233,9 @@ pub const SqliteBackend = struct {
 
         const db = self.db.?;
         const sql = switch (mode) {
-            .EQUAL => "SELECT key FROM table0 WHERE deleted = 0 AND key = ? LIMIT 1",
-            .GREATER_EQUAL => "SELECT key FROM table0 WHERE deleted = 0 AND key >= ? ORDER BY key ASC LIMIT 1",
-            .GREATER => "SELECT key FROM table0 WHERE deleted = 0 AND key > ? ORDER BY key ASC LIMIT 1",
+            .EQUAL => "SELECT key FROM table0 WHERE key = ? LIMIT 1",
+            .GREATER_EQUAL => "SELECT key FROM table0 WHERE key >= ? ORDER BY key ASC LIMIT 1",
+            .GREATER => "SELECT key FROM table0 WHERE key > ? ORDER BY key ASC LIMIT 1",
             else => return error.NotSupported,
         };
 
@@ -263,20 +265,25 @@ pub const SqliteBackend = struct {
         if (self.db == null) return error.IoError;
 
         const db = self.db.?;
-        const sql = "INSERT INTO file_lock (file_id, locked_by, process_id, locked_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)";
+        const open_mode = openModeToString(self.open_mode);
+        if (open_mode == null) return error.NotSupported;
+
+        if (!try self.canAcquireLock(db, open_mode.?)) return error.Locked;
+
+        const sql = "INSERT INTO file_lock (locked_by, process_id, locked_at, open_mode) VALUES (?, ?, CURRENT_TIMESTAMP, ?)";
 
         var stmt: ?*sqlite3.sqlite3_stmt = null;
         var rc = sqlite3.sqlite3_prepare_v2(db, @ptrCast(sql.ptr), @intCast(sql.len), &stmt, null);
         if (rc != sqlite3.SQLITE_OK) return error.IoError;
         defer _ = sqlite3.sqlite3_finalize(stmt.?);
 
-        rc = sqlite3.sqlite3_bind_text(stmt.?, 1, @ptrCast(self.db_path.ptr), @intCast(self.db_path.len), sqlite3.SQLITE_STATIC);
+        rc = sqlite3.sqlite3_bind_text(stmt.?, 1, @ptrCast(self.session_id.ptr), @intCast(self.session_id.len), sqlite3.SQLITE_STATIC);
         if (rc != sqlite3.SQLITE_OK) return error.IoError;
 
-        rc = sqlite3.sqlite3_bind_text(stmt.?, 2, @ptrCast(self.session_id.ptr), @intCast(self.session_id.len), sqlite3.SQLITE_STATIC);
+        rc = sqlite3.sqlite3_bind_text(stmt.?, 2, @ptrCast(self.process_id.ptr), @intCast(self.process_id.len), sqlite3.SQLITE_STATIC);
         if (rc != sqlite3.SQLITE_OK) return error.IoError;
 
-        rc = sqlite3.sqlite3_bind_text(stmt.?, 3, @ptrCast(self.process_id.ptr), @intCast(self.process_id.len), sqlite3.SQLITE_STATIC);
+        rc = sqlite3.sqlite3_bind_text(stmt.?, 3, @ptrCast(open_mode.?.ptr), @intCast(open_mode.?.len), sqlite3.SQLITE_STATIC);
         if (rc != sqlite3.SQLITE_OK) return error.IoError;
 
         rc = sqlite3.sqlite3_step(stmt.?);
@@ -289,21 +296,46 @@ pub const SqliteBackend = struct {
         if (self.db == null) return error.IoError;
 
         const db = self.db.?;
-        const sql = "DELETE FROM file_lock WHERE file_id = ? AND locked_by = ?";
+        const sql = "DELETE FROM file_lock WHERE locked_by = ?";
 
         var stmt: ?*sqlite3.sqlite3_stmt = null;
         var rc = sqlite3.sqlite3_prepare_v2(db, @ptrCast(sql.ptr), @intCast(sql.len), &stmt, null);
         if (rc != sqlite3.SQLITE_OK) return error.IoError;
         defer _ = sqlite3.sqlite3_finalize(stmt.?);
 
-        rc = sqlite3.sqlite3_bind_text(stmt.?, 1, @ptrCast(self.db_path.ptr), @intCast(self.db_path.len), sqlite3.SQLITE_STATIC);
-        if (rc != sqlite3.SQLITE_OK) return error.IoError;
-
-        rc = sqlite3.sqlite3_bind_text(stmt.?, 2, @ptrCast(self.session_id.ptr), @intCast(self.session_id.len), sqlite3.SQLITE_STATIC);
+        rc = sqlite3.sqlite3_bind_text(stmt.?, 1, @ptrCast(self.session_id.ptr), @intCast(self.session_id.len), sqlite3.SQLITE_STATIC);
         if (rc != sqlite3.SQLITE_OK) return error.IoError;
 
         rc = sqlite3.sqlite3_step(stmt.?);
         if (rc != sqlite3.SQLITE_DONE) return error.IoError;
+    }
+
+    fn openModeToString(mode: isam.OpenMode) ?[]const u8 {
+        return switch (mode) {
+            .INPUT => "INPUT",
+            .OUTPUT => "OUTPUT",
+            .IO => "I-O",
+            .EXTEND => "EXTEND",
+        };
+    }
+
+    fn canAcquireLock(self: *Self, db: *sqlite3.sqlite3, open_mode: []const u8) isam.IsamError!bool {
+        _ = self;
+        const sql = if (std.mem.eql(u8, open_mode, "OUTPUT"))
+            "SELECT exists(SELECT 1 FROM file_lock)"
+        else
+            "SELECT exists(SELECT 1 FROM file_lock WHERE open_mode = 'OUTPUT')";
+
+        var stmt: ?*sqlite3.sqlite3_stmt = null;
+        var rc = sqlite3.sqlite3_prepare_v2(db, @ptrCast(sql.ptr), @intCast(sql.len), &stmt, null);
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
+        defer _ = sqlite3.sqlite3_finalize(stmt.?);
+
+        rc = sqlite3.sqlite3_step(stmt.?);
+        if (rc != sqlite3.SQLITE_ROW) return error.IoError;
+
+        const exists_val = sqlite3.sqlite3_column_int(stmt.?, 0);
+        return exists_val == 0;
     }
 
     /// Create a new INDEXED file

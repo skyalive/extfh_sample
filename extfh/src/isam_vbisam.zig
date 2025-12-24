@@ -13,6 +13,10 @@ pub const VbisamBackend = struct {
         };
     }
 
+    pub fn deinit(self: *VbisamBackend) void {
+        _ = self;
+    }
+
     /// VBISAMエラーを汎用IsamErrorに変換
     fn mapError(err: vbisam.VbisamError) isam.IsamError {
         return switch (err) {

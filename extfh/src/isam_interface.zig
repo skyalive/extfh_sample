@@ -1,4 +1,8 @@
 const std = @import("std");
+const build_options = @import("build_options");
+
+const enable_vbisam = build_options.backend == .vbisam or build_options.backend == .both;
+const enable_sqlite = build_options.backend == .sqlite or build_options.backend == .both;
 
 /// ISAM エラー型（バックエンド非依存）
 pub const IsamError = error{
@@ -73,10 +77,108 @@ pub const IsamFileHandle = struct {
 };
 
 /// VBISAMバックエンド（フォワード宣言）
-pub const VbisamBackend = @import("isam_vbisam.zig").VbisamBackend;
+pub const VbisamBackend = if (enable_vbisam)
+    @import("isam_vbisam.zig").VbisamBackend
+else
+    struct {
+        pub fn init(_: std.mem.Allocator) @This() {
+            return .{};
+        }
+
+        pub fn deinit(_: *@This()) void {}
+
+        pub fn open(_: *@This(), _: []const u8, _: OpenMode) IsamError!IsamFileHandle {
+            return error.NotSupported;
+        }
+
+        pub fn close(_: *@This(), _: IsamFileHandle) IsamError!void {
+            return error.NotSupported;
+        }
+
+        pub fn read(_: *@This(), _: IsamFileHandle, _: []u8, _: ReadMode) IsamError!void {
+            return error.NotSupported;
+        }
+
+        pub fn write(_: *@This(), _: IsamFileHandle, _: []const u8) IsamError!void {
+            return error.NotSupported;
+        }
+
+        pub fn rewrite(_: *@This(), _: IsamFileHandle, _: []const u8) IsamError!void {
+            return error.NotSupported;
+        }
+
+        pub fn delete(_: *@This(), _: IsamFileHandle) IsamError!void {
+            return error.NotSupported;
+        }
+
+        pub fn start(_: *@This(), _: IsamFileHandle, _: []const u8, _: ReadMode) IsamError!void {
+            return error.NotSupported;
+        }
+
+        pub fn lock(_: *@This(), _: IsamFileHandle, _: LockMode) IsamError!void {
+            return error.NotSupported;
+        }
+
+        pub fn unlock(_: *@This(), _: IsamFileHandle) IsamError!void {
+            return error.NotSupported;
+        }
+
+        pub fn create(_: *@This(), _: []const u8, _: OpenMode, _: usize, _: usize, _: usize) IsamError!IsamFileHandle {
+            return error.NotSupported;
+        }
+    };
 
 /// SQLiteバックエンド（フォワード宣言）
-pub const SqliteBackend = @import("isam_sqlite.zig").SqliteBackend;
+pub const SqliteBackend = if (enable_sqlite)
+    @import("isam_sqlite.zig").SqliteBackend
+else
+    struct {
+        pub fn init(_: std.mem.Allocator, _: []const u8) !@This() {
+            return .{};
+        }
+
+        pub fn deinit(_: *@This()) void {}
+
+        pub fn open(_: *@This(), _: []const u8, _: OpenMode) IsamError!IsamFileHandle {
+            return error.NotSupported;
+        }
+
+        pub fn close(_: *@This(), _: IsamFileHandle) IsamError!void {
+            return error.NotSupported;
+        }
+
+        pub fn read(_: *@This(), _: IsamFileHandle, _: []u8, _: ReadMode) IsamError!void {
+            return error.NotSupported;
+        }
+
+        pub fn write(_: *@This(), _: IsamFileHandle, _: []const u8) IsamError!void {
+            return error.NotSupported;
+        }
+
+        pub fn rewrite(_: *@This(), _: IsamFileHandle, _: []const u8) IsamError!void {
+            return error.NotSupported;
+        }
+
+        pub fn delete(_: *@This(), _: IsamFileHandle) IsamError!void {
+            return error.NotSupported;
+        }
+
+        pub fn start(_: *@This(), _: IsamFileHandle, _: []const u8, _: ReadMode) IsamError!void {
+            return error.NotSupported;
+        }
+
+        pub fn lock(_: *@This(), _: IsamFileHandle, _: LockMode) IsamError!void {
+            return error.NotSupported;
+        }
+
+        pub fn unlock(_: *@This(), _: IsamFileHandle) IsamError!void {
+            return error.NotSupported;
+        }
+
+        pub fn create(_: *@This(), _: []const u8, _: OpenMode, _: usize, _: usize, _: usize) IsamError!IsamFileHandle {
+            return error.NotSupported;
+        }
+    };
 
 /// ISAM実装の抽象バックエンド
 pub const IsamBackend = union(enum) {
@@ -91,6 +193,13 @@ pub const IsamBackend = union(enum) {
             .VBISAM => |*backend| backend.open(filename, mode),
             .SQLITE => |*backend| backend.open(filename, mode),
         };
+    }
+
+    pub fn deinit(self: *IsamBackend) void {
+        switch (self.*) {
+            .VBISAM => |*backend| backend.deinit(),
+            .SQLITE => |*backend| backend.deinit(),
+        }
     }
 
     /// ファイルを閉じる

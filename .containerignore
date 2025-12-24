@@ -1,0 +1,12 @@
+.git
+.podman
+**/.DS_Store
+**/.zig-cache
+**/zig-out
+demo/work
+extfh/lib
+extfh/test
+kjconv
+opensourcecobol4j
+repo/*
+!repo/zig-aarch64-linux-0.15.2

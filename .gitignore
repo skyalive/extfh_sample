@@ -1,0 +1,13 @@
+.DS_Store
+.podman/
+.zig-cache/
+zig-out/
+tmp_eof/
+opensourcecobol4j/
+demo/work/
+demo/IDXFILE
+extfh/test/cobol/SEQFILE
+extfh/test/cobol/TESTFILE
+extfh/test/cobol/sample_app
+extfh/test/cobol4j/*.idx
+extfh/test/cobol4j/interop_*

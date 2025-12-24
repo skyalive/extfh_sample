@@ -13,9 +13,10 @@ const std = @import("std");
 const cob = @cImport({
     @cInclude("gnucobol_common.h");
 });
+extern fn cob_set_exception(id: c_int) void;
 // Abstraction layer imports (ISAM backend-independent interface)
 const isam = @import("isam_interface.zig");
-const isam_vbisam = @import("isam_vbisam.zig");
+const build_options = @import("build_options");
 
 /// File organization types
 pub const FileType = enum {
@@ -74,6 +75,13 @@ fn readCompX4(bytes: *const [4]u8) u32 {
         @as(u32, bytes[3]);
 }
 
+fn writeCompX4(bytes: *[4]u8, value: u32) void {
+    bytes[0] = @intCast(value >> 24);
+    bytes[1] = @intCast(value >> 16);
+    bytes[2] = @intCast(value >> 8);
+    bytes[3] = @intCast(value);
+}
+
 fn statusToFileStatus(status: c_short, fcd: *cob.FCD3) void {
     const s: i32 = @intCast(status);
     const tens: u8 = @intCast(@min(@max(@divTrunc(s, 10), 0), 9));
@@ -109,6 +117,26 @@ fn fillKeyInfo(fcd: *cob.FCD3, out: *FCD3) void {
     const extkey_ptr: *const cob.EXTKEY = @ptrFromInt(base + @as(usize, offset));
     out.record_key_pos = @intCast(readCompX4(&extkey_ptr.pos));
     out.record_key_size = @intCast(readCompX4(&extkey_ptr.len));
+}
+
+fn resolveEnvFilename(alloc: std.mem.Allocator, filename: []const u8) !?[]const u8 {
+    const dd_key = try std.fmt.allocPrint(alloc, "DD_{s}", .{filename});
+    defer alloc.free(dd_key);
+    if (std.process.getEnvVarOwned(alloc, dd_key)) |val| {
+        return val;
+    } else |_| {}
+
+    const dd_lower_key = try std.fmt.allocPrint(alloc, "dd_{s}", .{filename});
+    defer alloc.free(dd_lower_key);
+    if (std.process.getEnvVarOwned(alloc, dd_lower_key)) |val| {
+        return val;
+    } else |_| {}
+
+    if (std.process.getEnvVarOwned(alloc, filename)) |val| {
+        return val;
+    } else |_| {}
+
+    return null;
 }
 
 fn opcodeToCall(opcode: u16, out: *FCD3) void {
@@ -162,7 +190,8 @@ fn opcodeToCall(opcode: u16, out: *FCD3) void {
 /// File context for tracking open files
 pub const ExtfhFileContext = struct {
     file_type: FileType,                // File organization type
-    vbisam_handle: c_int,               // VBISAM file handle (indexed files only)
+    backend_type: ?isam.BackendType = null, // Active backend for indexed files
+    isam_handle: c_int,               // ISAM backend handle (indexed files only)
     sequential_file: ?std.fs.File = null, // File handle for sequential files
     filename: []const u8,               // Owned filename
     record_size: usize,                 // Record size
@@ -172,13 +201,22 @@ pub const ExtfhFileContext = struct {
     eof_reached: bool = false,          // EOF flag for sequential reads
 };
 
-/// Global handle table (maps EXTFH handles to VBISAM contexts)
+/// Global handle table (maps EXTFH handles to ISAM contexts)
 var handle_table: std.AutoHashMap(c_int, ExtfhFileContext) = undefined;
 var handle_table_mutex = std.Thread.Mutex{};
 var next_handle: c_int = 1;
 var allocator: ?std.mem.Allocator = null;
-var backend: ?isam.IsamBackend = null;
+var backend_vbisam: ?isam.IsamBackend = null;
+var backend_sqlite: ?isam.IsamBackend = null;
 var initialized = false;
+
+fn getBackendForType(backend_type: isam.BackendType) ?*isam.IsamBackend {
+    return switch (backend_type) {
+        .VBISAM => if (backend_vbisam) |*bknd| bknd else null,
+        .SQLITE => if (backend_sqlite) |*bknd| bknd else null,
+        else => null,
+    };
+}
 
 /// Initialize EXTFH system
 pub fn init(alloc: std.mem.Allocator) !void {
@@ -187,10 +225,19 @@ pub fn init(alloc: std.mem.Allocator) !void {
     allocator = alloc;
     handle_table = std.AutoHashMap(c_int, ExtfhFileContext).init(alloc);
 
-    // Initialize VBISAM backend
-    backend = .{
-        .VBISAM = isam_vbisam.VbisamBackend.init(alloc),
-    };
+    switch (build_options.backend) {
+        .vbisam => {
+            backend_vbisam = .{ .VBISAM = isam.VbisamBackend.init(alloc) };
+        },
+        .sqlite => {
+            backend_sqlite = .{ .SQLITE = try isam.SqliteBackend.init(alloc, "") };
+        },
+        .both => {
+            backend_vbisam = .{ .VBISAM = isam.VbisamBackend.init(alloc) };
+            backend_sqlite = .{ .SQLITE = try isam.SqliteBackend.init(alloc, "") };
+        },
+        .none => {},
+    }
 
     initialized = true;
 }
@@ -207,10 +254,11 @@ pub fn deinit() void {
         if (context.is_open) {
             if (context.file_type == .INDEXED) {
                 // Close INDEXED files via backend (CRITICAL: prevent resource leak)
-                if (backend) |*bknd| {
+                const backend_type = context.backend_type orelse continue;
+                if (getBackendForType(backend_type)) |bknd| {
                     const handle = isam.IsamFileHandle{
-                        .backend_type = .VBISAM,
-                        .handle = context.vbisam_handle,
+                        .backend_type = backend_type,
+                        .handle = context.isam_handle,
                         .record_size = context.record_size,
                         .key_offset = 0,
                         .key_size = 0,
@@ -232,7 +280,14 @@ pub fn deinit() void {
     }
 
     handle_table.deinit();
-    backend = null;
+    if (backend_vbisam) |*bknd| {
+        bknd.deinit();
+    }
+    if (backend_sqlite) |*bknd| {
+        bknd.deinit();
+    }
+    backend_vbisam = null;
+    backend_sqlite = null;
     initialized = false;
 }
 
@@ -275,7 +330,7 @@ pub export fn czippfh(opcode_ptr: [*c]u8, fcd_ptr: *cob.FCD3) callconv(.c) void 
 
     const max_len = readCompX4(&fcd_ptr.maxRecLen);
     const cur_len = readCompX4(&fcd_ptr.curRecLen);
-    fcd.record_size = @intCast(if (max_len != 0) max_len else cur_len);
+    fcd.record_size = @intCast(if (cur_len != 0) cur_len else max_len);
 
     fillFilename(fcd_ptr, &fcd.filename);
     fillKeyInfo(fcd_ptr, &fcd);
@@ -308,7 +363,7 @@ pub export fn czippfh(opcode_ptr: [*c]u8, fcd_ptr: *cob.FCD3) callconv(.c) void 
     switch (fcd.call_id) {
         1 => handleOpen(&fcd),
         2 => handleClose(&fcd),
-        3 => handleRead(&fcd),
+        3 => handleRead(&fcd, fcd_ptr),
         4 => handleWrite(&fcd),
         5 => handleRewrite(&fcd),
         6 => handleDelete(&fcd),
@@ -323,6 +378,8 @@ pub export fn czippfh(opcode_ptr: [*c]u8, fcd_ptr: *cob.FCD3) callconv(.c) void 
 
     if (fcd.handle != 0) {
         fcd_ptr._fileHandle.ptr_name = @ptrFromInt(@as(usize, @intCast(fcd.handle)));
+    } else if (fcd.call_id == 2) {
+        fcd_ptr._fileHandle.ptr_name = null;
     }
     statusToFileStatus(fcd.status, fcd_ptr);
 }
@@ -342,10 +399,19 @@ fn handleOpen(fcd: *FCD3) void {
 
     // Extract filename (null-terminated string from FCD3)
     const filename_str = std.mem.sliceTo(&fcd.filename, 0);
-    var filename = alloc.dupe(u8, filename_str) catch {
+    var filename: []const u8 = alloc.dupe(u8, filename_str) catch {
         fcd.status = 5;
         return;
     };
+    const resolved = resolveEnvFilename(alloc, filename) catch {
+        alloc.free(filename);
+        fcd.status = 5;
+        return;
+    };
+    if (resolved) |resolved_name| {
+        alloc.free(filename);
+        filename = resolved_name;
+    }
 
     // Detect file type based on extension
     const file_type = detectFileType(filename, fcd.file_open_mode == 1);
@@ -371,13 +437,18 @@ fn handleOpen(fcd: *FCD3) void {
 }
 
 
-/// OPEN for INDEXED (VSAM KSDS) files via VBISAM
+/// OPEN for INDEXED (VSAM KSDS) files via backend
 fn handleOpenIndexed(fcd: *FCD3, alloc: std.mem.Allocator, filename: []const u8) void {
-    if (backend == null) {
+    const backend_type = detectBackendType(filename) orelse {
         alloc.free(filename);
         fcd.status = 5; // I/O error
         return;
-    }
+    };
+    const backend = getBackendForType(backend_type) orelse {
+        alloc.free(filename);
+        fcd.status = 5; // I/O error
+        return;
+    };
 
     // Determine ISAM open mode
     const isam_mode: isam.OpenMode = switch (fcd.file_open_mode) {
@@ -390,7 +461,7 @@ fn handleOpenIndexed(fcd: *FCD3, alloc: std.mem.Allocator, filename: []const u8)
     // Try to open or create INDEXED file via backend
     const handle_result = if (fcd.file_open_mode == 0) blk: {
         // INPUT mode: open existing file via backend
-        break :blk backend.?.open(filename, isam_mode) catch |err| {
+        break :blk backend.open(filename, isam_mode) catch |err| {
             alloc.free(filename);
             fcd.status = switch (err) {
                 isam.IsamError.NotFound => 1,
@@ -401,7 +472,7 @@ fn handleOpenIndexed(fcd: *FCD3, alloc: std.mem.Allocator, filename: []const u8)
         };
     } else blk: {
         // OUTPUT/EXTEND mode: create new file via backend
-        break :blk backend.?.create(
+        break :blk backend.create(
             filename,
             isam_mode,
             @intCast(fcd.record_size),
@@ -423,7 +494,8 @@ fn handleOpenIndexed(fcd: *FCD3, alloc: std.mem.Allocator, filename: []const u8)
 
     const context = ExtfhFileContext{
         .file_type = .INDEXED,
-        .vbisam_handle = handle_result.handle,
+        .backend_type = handle_result.backend_type,
+        .isam_handle = handle_result.handle,
         .filename = filename,
         .record_size = handle_result.record_size,
         .allocator = alloc,
@@ -490,7 +562,7 @@ fn handleOpenSequential(fcd: *FCD3, alloc: std.mem.Allocator, filename: []const 
 
     const context = ExtfhFileContext{
         .file_type = .SEQUENTIAL,
-        .vbisam_handle = -1, // Not used for sequential
+        .isam_handle = -1, // Not used for sequential
         .sequential_file = file,
         .filename = filename,
         .record_size = @intCast(fcd.record_size),
@@ -521,30 +593,27 @@ fn handleClose(fcd: *FCD3) void {
     };
     const context = ctx.value;
 
-    if (backend == null) {
-        fcd.status = 5; // I/O error
-        if (context.file_type == .SEQUENTIAL) {
-            if (context.sequential_file) |file| {
-                file.close();
-            }
-        }
-        context.allocator.free(context.filename);
-        return;
-    }
-
     switch (context.file_type) {
         .INDEXED => {
             // Close INDEXED file via backend
-            const handle = isam.IsamFileHandle{
-                .backend_type = .VBISAM,
-                .handle = context.vbisam_handle,
-                .record_size = context.record_size,
-                .key_offset = 0,
-                .key_size = 0,
-            };
-            backend.?.close(handle) catch |err| {
-                fcd.status = mapIsamErrorToStatus(err);
-            };
+            if (context.backend_type) |backend_type| {
+                const handle = isam.IsamFileHandle{
+                    .backend_type = backend_type,
+                    .handle = context.isam_handle,
+                    .record_size = context.record_size,
+                    .key_offset = 0,
+                    .key_size = 0,
+                };
+                if (getBackendForType(backend_type)) |bknd| {
+                    bknd.close(handle) catch |err| {
+                        fcd.status = mapIsamErrorToStatus(err);
+                    };
+                } else {
+                    fcd.status = 5;
+                }
+            } else {
+                fcd.status = 5;
+            }
         },
         .SEQUENTIAL => {
             // Close sequential file
@@ -558,11 +627,15 @@ fn handleClose(fcd: *FCD3) void {
     // Clean up filename
     context.allocator.free(context.filename);
 
+    fcd.handle = 0;
     fcd.status = 0; // Success
+    if (!@import("builtin").is_test) {
+        cob_set_exception(0);
+    }
 }
 
 /// READ operation (call_id = 3)
-fn handleRead(fcd: *FCD3) void {
+fn handleRead(fcd: *FCD3, fcd_ptr: *cob.FCD3) void {
     handle_table_mutex.lock();
     defer handle_table_mutex.unlock();
 
@@ -573,7 +646,7 @@ fn handleRead(fcd: *FCD3) void {
 
     switch (context_ptr.file_type) {
         .INDEXED => handleReadIndexed(fcd, context_ptr),
-        .SEQUENTIAL => handleReadSequential(fcd, context_ptr),
+        .SEQUENTIAL => handleReadSequential(fcd, context_ptr, fcd_ptr),
         else => {
             fcd.status = 5; // Unsupported file type
         },
@@ -582,11 +655,6 @@ fn handleRead(fcd: *FCD3) void {
 
 /// READ for INDEXED files via VBISAM
 fn handleReadIndexed(fcd: *FCD3, context: *ExtfhFileContext) void {
-    if (backend == null) {
-        fcd.status = 5; // I/O error
-        return;
-    }
-
     // Convert COBOL read mode to unified ISAM read mode
     const isam_mode: isam.ReadMode = switch (fcd.option) {
         0 => .FIRST,
@@ -599,9 +667,18 @@ fn handleReadIndexed(fcd: *FCD3, context: *ExtfhFileContext) void {
         else => .NEXT,
     };
 
+    const backend_type = context.backend_type orelse {
+        fcd.status = 5;
+        return;
+    };
+    const backend = getBackendForType(backend_type) orelse {
+        fcd.status = 5;
+        return;
+    };
+
     const handle = isam.IsamFileHandle{
-        .backend_type = .VBISAM,
-        .handle = context.vbisam_handle,
+        .backend_type = backend_type,
+        .handle = context.isam_handle,
         .record_size = context.record_size,
         .key_offset = @intCast(fcd.record_key_pos),
         .key_size = @intCast(fcd.record_key_size),
@@ -609,7 +686,7 @@ fn handleReadIndexed(fcd: *FCD3, context: *ExtfhFileContext) void {
 
     // Read record into buffer
     const record_buf = fcd.record_ptr[0..context.record_size];
-    backend.?.read(handle, record_buf, isam_mode) catch |err| {
+    backend.read(handle, record_buf, isam_mode) catch |err| {
         fcd.status = mapIsamErrorToStatus(err);
         return;
     };
@@ -618,10 +695,10 @@ fn handleReadIndexed(fcd: *FCD3, context: *ExtfhFileContext) void {
 }
 
 /// READ for SEQUENTIAL (Line Sequential) files
-fn handleReadSequential(fcd: *FCD3, context: *ExtfhFileContext) void {
+fn handleReadSequential(fcd: *FCD3, context: *ExtfhFileContext, fcd_ptr: *cob.FCD3) void {
     // Check for EOF
     if (context.eof_reached) {
-        fcd.status = 4; // End of file / No record
+        fcd.status = 10; // End of file
         return;
     }
 
@@ -629,6 +706,10 @@ fn handleReadSequential(fcd: *FCD3, context: *ExtfhFileContext) void {
         fcd.status = 5; // I/O error
         return;
     };
+    if (fcd.record_ptr == null or context.record_size <= 0) {
+        fcd.status = 5; // I/O error
+        return;
+    }
 
     // Read one line using low-level read API (Line Sequential format)
     var line_buf: [4096]u8 = undefined;
@@ -644,7 +725,7 @@ fn handleReadSequential(fcd: *FCD3, context: *ExtfhFileContext) void {
             // EOF reached
             if (line_len == 0) {
                 context.eof_reached = true;
-                fcd.status = 4; // End of file
+                fcd.status = 10; // End of file
                 return;
             }
             break; // Return partial line
@@ -663,6 +744,7 @@ fn handleReadSequential(fcd: *FCD3, context: *ExtfhFileContext) void {
     if (copy_len < context.record_size) {
         @memset(record_buf[copy_len..], ' ');
     }
+    writeCompX4(&fcd_ptr.curRecLen, @intCast(line_len));
     fcd.status = 0; // Success
 }
 
@@ -685,23 +767,27 @@ fn handleWrite(fcd: *FCD3) void {
     }
 }
 
-/// WRITE for INDEXED files via VBISAM
+/// WRITE for INDEXED files via backend
 fn handleWriteIndexed(fcd: *FCD3, context: *ExtfhFileContext) void {
-    if (backend == null) {
-        fcd.status = 5; // I/O error
+    const backend_type = context.backend_type orelse {
+        fcd.status = 5;
         return;
-    }
+    };
+    const backend = getBackendForType(backend_type) orelse {
+        fcd.status = 5;
+        return;
+    };
 
     const handle = isam.IsamFileHandle{
-        .backend_type = .VBISAM,
-        .handle = context.vbisam_handle,
+        .backend_type = backend_type,
+        .handle = context.isam_handle,
         .record_size = context.record_size,
         .key_offset = @intCast(fcd.record_key_pos),
         .key_size = @intCast(fcd.record_key_size),
     };
 
     const record_buf = fcd.record_ptr[0..context.record_size];
-    backend.?.write(handle, record_buf) catch |err| {
+    backend.write(handle, record_buf) catch |err| {
         fcd.status = mapIsamErrorToStatus(err);
         return;
     };
@@ -715,6 +801,10 @@ fn handleWriteSequential(fcd: *FCD3, context: *ExtfhFileContext) void {
         fcd.status = 5; // I/O error
         return;
     };
+    if (fcd.record_ptr == null or context.record_size <= 0) {
+        fcd.status = 5; // I/O error
+        return;
+    }
 
     // Get record data (trim trailing spaces for Line Sequential)
     const record_buf = fcd.record_ptr[0..context.record_size];
@@ -753,21 +843,25 @@ fn handleRewrite(fcd: *FCD3) void {
         return;
     }
 
-    if (backend == null) {
-        fcd.status = 5; // I/O error
+    const backend_type = context.backend_type orelse {
+        fcd.status = 5;
         return;
-    }
+    };
+    const backend = getBackendForType(backend_type) orelse {
+        fcd.status = 5;
+        return;
+    };
 
     const handle = isam.IsamFileHandle{
-        .backend_type = .VBISAM,
-        .handle = context.vbisam_handle,
+        .backend_type = backend_type,
+        .handle = context.isam_handle,
         .record_size = context.record_size,
         .key_offset = @intCast(fcd.record_key_pos),
         .key_size = @intCast(fcd.record_key_size),
     };
 
     const record_buf = fcd.record_ptr[0..context.record_size];
-    backend.?.rewrite(handle, record_buf) catch |err| {
+    backend.rewrite(handle, record_buf) catch |err| {
         fcd.status = mapIsamErrorToStatus(err);
         return;
     };
@@ -791,20 +885,24 @@ fn handleDelete(fcd: *FCD3) void {
         return;
     }
 
-    if (backend == null) {
-        fcd.status = 5; // I/O error
+    const backend_type = context.backend_type orelse {
+        fcd.status = 5;
         return;
-    }
+    };
+    const backend = getBackendForType(backend_type) orelse {
+        fcd.status = 5;
+        return;
+    };
 
     const handle = isam.IsamFileHandle{
-        .backend_type = .VBISAM,
-        .handle = context.vbisam_handle,
+        .backend_type = backend_type,
+        .handle = context.isam_handle,
         .record_size = context.record_size,
         .key_offset = @intCast(fcd.record_key_pos),
         .key_size = @intCast(fcd.record_key_size),
     };
 
-    backend.?.delete(handle) catch |err| {
+    backend.delete(handle) catch |err| {
         fcd.status = mapIsamErrorToStatus(err);
         return;
     };
@@ -828,15 +926,19 @@ fn handleStart(fcd: *FCD3) void {
         return;
     }
 
-    if (backend == null) {
-        fcd.status = 5; // I/O error
-        return;
-    }
-
     if (fcd.key_ptr == null or fcd.record_key_size == 0) {
         fcd.status = 5; // I/O error
         return;
     }
+
+    const backend_type = context.backend_type orelse {
+        fcd.status = 5;
+        return;
+    };
+    const backend = getBackendForType(backend_type) orelse {
+        fcd.status = 5;
+        return;
+    };
 
     // Convert COBOL read mode to unified ISAM read mode
     const isam_mode: isam.ReadMode = switch (fcd.option) {
@@ -846,15 +948,15 @@ fn handleStart(fcd: *FCD3) void {
     };
 
     const handle = isam.IsamFileHandle{
-        .backend_type = .VBISAM,
-        .handle = context.vbisam_handle,
+        .backend_type = backend_type,
+        .handle = context.isam_handle,
         .record_size = context.record_size,
         .key_offset = @intCast(fcd.record_key_pos),
         .key_size = @intCast(fcd.record_key_size),
     };
 
     const key_buf = fcd.key_ptr[0..@intCast(fcd.record_key_size)];
-    backend.?.start(handle, key_buf, isam_mode) catch |err| {
+    backend.start(handle, key_buf, isam_mode) catch |err| {
         fcd.status = mapIsamErrorToStatus(err);
         return;
     };
@@ -891,25 +993,49 @@ fn handleUnlock(fcd: *FCD3) void {
         return;
     }
 
-    if (backend == null) {
-        fcd.status = 5; // I/O error
+    const backend_type = context.backend_type orelse {
+        fcd.status = 5;
         return;
-    }
+    };
+    const backend = getBackendForType(backend_type) orelse {
+        fcd.status = 5;
+        return;
+    };
 
     const handle = isam.IsamFileHandle{
-        .backend_type = .VBISAM,
-        .handle = context.vbisam_handle,
+        .backend_type = backend_type,
+        .handle = context.isam_handle,
         .record_size = context.record_size,
         .key_offset = @intCast(fcd.record_key_pos),
         .key_size = @intCast(fcd.record_key_size),
     };
 
-    backend.?.unlock(handle) catch |err| {
+    backend.unlock(handle) catch |err| {
         fcd.status = mapIsamErrorToStatus(err);
         return;
     };
 
     fcd.status = 0; // Success
+}
+
+fn detectBackendType(filename: []const u8) ?isam.BackendType {
+    if (std.mem.endsWith(u8, filename, ".db") or
+        std.mem.endsWith(u8, filename, ".sqlite") or
+        std.mem.endsWith(u8, filename, ".sqlite3"))
+    {
+        if (backend_sqlite != null) return .SQLITE;
+    }
+    if (std.mem.endsWith(u8, filename, ".isam") or
+        std.mem.endsWith(u8, filename, ".idx") or
+        std.mem.endsWith(u8, filename, ".ksds") or
+        std.mem.endsWith(u8, filename, ".vsam"))
+    {
+        if (backend_vbisam != null) return .VBISAM;
+    }
+
+    if (backend_vbisam != null and backend_sqlite == null) return .VBISAM;
+    if (backend_sqlite != null and backend_vbisam == null) return .SQLITE;
+    return null;
 }
 
 /// Detect file organization type based on filename extension or create new file
@@ -920,7 +1046,10 @@ fn detectFileType(filename: []const u8, create_new: bool) FileType {
     if (std.mem.endsWith(u8, filename, ".isam") or
         std.mem.endsWith(u8, filename, ".idx") or
         std.mem.endsWith(u8, filename, ".ksds") or
-        std.mem.endsWith(u8, filename, ".vsam"))
+        std.mem.endsWith(u8, filename, ".vsam") or
+        std.mem.endsWith(u8, filename, ".db") or
+        std.mem.endsWith(u8, filename, ".sqlite") or
+        std.mem.endsWith(u8, filename, ".sqlite3"))
     {
         return .INDEXED;
     }
@@ -961,6 +1090,8 @@ test "EXTFH: FileType detection" {
     try std.testing.expectEqual(FileType.INDEXED, detectFileType("data.isam", false));
     try std.testing.expectEqual(FileType.INDEXED, detectFileType("data.idx", false));
     try std.testing.expectEqual(FileType.INDEXED, detectFileType("data.ksds", false));
+    try std.testing.expectEqual(FileType.INDEXED, detectFileType("data.db", false));
+    try std.testing.expectEqual(FileType.INDEXED, detectFileType("data.sqlite", false));
     try std.testing.expectEqual(FileType.INDEXED, detectFileType("data.vsam", false));
 
     // RELATIVE files

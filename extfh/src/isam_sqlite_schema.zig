@@ -7,7 +7,6 @@ pub const KeyInfo = struct {
     key_offset: usize,
     key_size: usize,
     allow_duplicates: bool,
-    key_type: []const u8,
 };
 
 pub const SchemaManager = struct {
@@ -42,7 +41,7 @@ pub const SchemaManager = struct {
 
         try setMetadataInt(self.db, "record_size", @intCast(record_size));
         try setMetadataInt(self.db, "num_keys", @intCast(num_keys));
-        try setKeyInfo(self.db, 0, key_offset, key_size, false, "CHAR");
+        try setKeyInfo(self.db, 0, key_offset, key_size, false);
     }
 
     pub fn getRecordSize(self: *const SchemaManager) isam.IsamError!usize {
@@ -103,9 +102,9 @@ pub const SchemaManager = struct {
         return error.NotFound;
     }
 
-    fn setKeyInfo(db: *sqlite3.sqlite3, key_number: usize, key_offset: usize, key_size: usize, allow_duplicates: bool, key_type: []const u8) isam.IsamError!void {
+    fn setKeyInfo(db: *sqlite3.sqlite3, key_number: usize, key_offset: usize, key_size: usize, allow_duplicates: bool) isam.IsamError!void {
         const sql =
-            "INSERT OR REPLACE INTO metadata_key (key_number, key_offset, key_size, allow_duplicates, key_type) VALUES (?, ?, ?, ?, ?)";
+            "INSERT OR REPLACE INTO metadata_key (idx, offset, size, duplicate) VALUES (?, ?, ?, ?)";
         var stmt: ?*sqlite3.sqlite3_stmt = null;
         var rc = sqlite3.sqlite3_prepare_v2(db, @ptrCast(sql.ptr), @intCast(sql.len), &stmt, null);
         if (rc != sqlite3.SQLITE_OK) return error.IoError;
@@ -123,15 +122,12 @@ pub const SchemaManager = struct {
         rc = sqlite3.sqlite3_bind_int(stmt.?, 4, if (allow_duplicates) 1 else 0);
         if (rc != sqlite3.SQLITE_OK) return error.IoError;
 
-        rc = sqlite3.sqlite3_bind_text(stmt.?, 5, @ptrCast(key_type.ptr), @intCast(key_type.len), sqlite3.SQLITE_STATIC);
-        if (rc != sqlite3.SQLITE_OK) return error.IoError;
-
         rc = sqlite3.sqlite3_step(stmt.?);
         if (rc != sqlite3.SQLITE_DONE) return error.IoError;
     }
 
     fn getKeyInfo(db: *sqlite3.sqlite3, key_number: usize) isam.IsamError!KeyInfo {
-        const sql = "SELECT key_offset, key_size, allow_duplicates FROM metadata_key WHERE key_number = ?";
+        const sql = "SELECT offset, size, duplicate FROM metadata_key WHERE idx = ?";
         var stmt: ?*sqlite3.sqlite3_stmt = null;
         var rc = sqlite3.sqlite3_prepare_v2(db, @ptrCast(sql.ptr), @intCast(sql.len), &stmt, null);
         if (rc != sqlite3.SQLITE_OK) return error.IoError;
@@ -151,7 +147,6 @@ pub const SchemaManager = struct {
                 .key_offset = @intCast(offset_val),
                 .key_size = @intCast(size_val),
                 .allow_duplicates = dup_val != 0,
-                .key_type = "CHAR",
             };
         }
         return error.NotFound;
@@ -163,8 +158,7 @@ pub const SchemaManager = struct {
         \\  value BLOB NOT NULL,
         \\  locked_by TEXT,
         \\  process_id TEXT,
-        \\  locked_at TIMESTAMP,
-        \\  deleted INTEGER DEFAULT 0
+        \\  locked_at TIMESTAMP
         \\);
     ;
 
@@ -177,20 +171,21 @@ pub const SchemaManager = struct {
 
     const CREATE_METADATA_KEY =
         \\CREATE TABLE IF NOT EXISTS metadata_key (
-        \\  key_number INT PRIMARY KEY,
-        \\  key_offset INT,
-        \\  key_size INT,
-        \\  allow_duplicates INT,
-        \\  key_type TEXT
+        \\  idx INT PRIMARY KEY,
+        \\  offset INT,
+        \\  size INT,
+        \\  duplicate INT
         \\);
     ;
 
     const CREATE_FILE_LOCK =
         \\CREATE TABLE IF NOT EXISTS file_lock (
-        \\  file_id TEXT PRIMARY KEY,
-        \\  locked_by TEXT,
+        \\  locked_by TEXT PRIMARY KEY,
         \\  process_id TEXT,
-        \\  locked_at TIMESTAMP
+        \\  locked_at TIMESTAMP,
+        \\  open_mode TEXT CONSTRAINT check_open_mode CHECK (
+        \\    open_mode IN ('INPUT', 'OUTPUT', 'I-O', 'EXTEND')
+        \\  )
         \\);
     ;
 
