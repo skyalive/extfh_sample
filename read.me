@@ -1,25 +1,23 @@
-本ディレクトリは、ローカル開発プロジェクト向けの Zig 共通ライブラリを管理する。
-各プロジェクトはこのリポジトリをインポートして利用する。
+GnuCOBOL EXTFH 開発検証リポジトリ
+本ディレクトリは GnuCOBOL EXTFH の開発をテーマに、Codex による GnuCOBOL ライブラリ開発の検証を行った成果物です。
+意図的に Codex の成果物をそのまま掲載しています。あくまでも試作品のため、商用環境への適用は避けてください。
 
-共通ルール
-- 仕様駆動開発（Spec Kit）を基本とし、仕様は `/spec` に保存する。
-- 実装はテスト駆動開発（TDD）を基本とする。
-- セッション開始時に Plan/todo を確認し、終了前に更新する。
-- 開発は macOS ではなく Podman（Ubuntu 25.10）上でテストする。
-- ドキュメント/ソースコメント/コミットメッセージは英語、プロンプト会話は日本語。
-
-対象プロジェクト
-- `extfh`：各プロジェクトでインポートする Zig 共通ライブラリ
-- 開発ディレクトリ: `/extfh`
+フォルダ構成（概要）
+- `extfh/`：Zig で実装した EXTFH 本体と仕様書
+- `extfh/spec/`：仕様・ログ・検討メモ
+- `extfh/test/`：テスト資産（COBOL/COBOL4J）
+- `extfh/demo/`：相互運用デモ（Podman で実行）
+- `extfh/demo/container/`：Ubuntu コンテナ定義
+- `repo/`：Zig バイナリ等の依存物
 
 Podman（Ubuntu Linux）テスト環境
 - イメージ作成:
-  - `./demo/container/podman-build.sh`
+  - `./extfh/demo/container/podman-build.sh`
   - Zig パッケージは `repo/zig-aarch64-linux-0.15.2` を使用
-  - 別パス: `ZIG_DIR=repo/zig-x86_64-linux-0.15.2 ./demo/container/podman-build.sh`
+  - 別パス: `ZIG_DIR=repo/zig-x86_64-linux-0.15.2 ./extfh/demo/container/podman-build.sh`
 - デモ実行（コンテナ内でビルドとテストを実施）:
-  - `./demo/run_demo.sh`
+  - `./extfh/demo/run_demo.sh`
 - 成果物:
-  - `demo/work` に保存
+  - `extfh/demo/work` に保存
 - 備考:
-  - ベースイメージは `ubuntu:25.10`。未提供の場合は `demo/container/Containerfile` の `FROM` を更新する。
+  - ベースイメージは `ubuntu:25.10`。未提供の場合は `extfh/demo/container/Containerfile` の `FROM` を更新する。

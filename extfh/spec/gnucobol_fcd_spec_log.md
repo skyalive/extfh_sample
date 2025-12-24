@@ -37,9 +37,9 @@ GnuCOBOL の EXTFH 仕様（FCD3 と opcode）を確認し、Zig 側実装との
 
 ## 実施した作業
 ### 1) Podman で Linux テスト環境を構築
-- `demo/container/Containerfile` を追加
-- `demo/container/podman-build.sh` と `demo/run_demo.sh` を追加
-- Linux での検証は `demo/run_demo.sh` に統合
+- `extfh/demo/container/Containerfile` を追加
+- `extfh/demo/container/podman-build.sh` と `extfh/demo/run_demo.sh` を追加
+- Linux での検証は `extfh/demo/run_demo.sh` に統合
 
 ### 2) GnuCOBOL 仕様調査
 - Podman 内の copybook を確認
@@ -66,9 +66,9 @@ GnuCOBOL の EXTFH 仕様（FCD3 と opcode）を確認し、Zig 側実装との
 
 ## 再実行手順（簡易）
 1) Podman イメージ作成
-   - `./demo/container/podman-build.sh`
+   - `./extfh/demo/container/podman-build.sh`
 2) Linux テスト
-   - `./demo/run_demo.sh`
+   - `./extfh/demo/run_demo.sh`
 4) FCD 比較ツール
    - `repo/zig-aarch64-macos-0.15.2/zig run extfh/tools/fcd_compare.zig -I extfh/include`
 

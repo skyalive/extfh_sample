@@ -4,8 +4,8 @@
 zig-out/
 tmp_eof/
 opensourcecobol4j/
-demo/work/
-demo/IDXFILE
+extfh/demo/work/
+extfh/demo/IDXFILE
 extfh/test/cobol/SEQFILE
 extfh/test/cobol/TESTFILE
 extfh/test/cobol/sample_app

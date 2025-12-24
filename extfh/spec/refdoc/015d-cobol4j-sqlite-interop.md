@@ -219,7 +219,7 @@ COBOL4J は既存の SQLite JDBC 実装（`CobolIndexedFile`）をそのまま�
 #### テスト 1: COBOL4J → GnuCOBOL 読み取り
 
 ```
-./demo/run_demo.sh
+./extfh/demo/run_demo.sh
 ```
 
 - COBOL4J の `cobj-idx` で DB を作成/参照
@@ -228,7 +228,7 @@ COBOL4J は既存の SQLite JDBC 実装（`CobolIndexedFile`）をそのまま�
 #### テスト 2: GnuCOBOL → COBOL4J 読み取り
 
 ```
-./demo/run_demo.sh
+./extfh/demo/run_demo.sh
 ```
 
 - GnuCOBOL 側（Zig）が DB 作成・書き込み

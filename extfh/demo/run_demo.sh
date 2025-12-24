@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-DEMO_DIR="$ROOT_DIR/demo"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+DEMO_DIR="$ROOT_DIR/extfh/demo"
 WORK_DIR="$DEMO_DIR/work"
 IMAGE_NAME=${IMAGE_NAME:-ziglibs-ubuntu:25.10}
 
@@ -16,8 +16,8 @@ podman run --rm -t \
   "$IMAGE_NAME" \
   bash -lc '\
     set -eu; \
-    DEMO_DIR=/work/demo; \
-    WORK_DIR=/work/demo/work; \
+    DEMO_DIR=/work/extfh/demo; \
+    WORK_DIR=/work/extfh/demo/work; \
     export WORK_DIR; \
     export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"; \
     mkdir -p "$WORK_DIR"/{vbisam,sqlite}; \
@@ -40,7 +40,7 @@ podman run --rm -t \
     cp zig-out/lib/libextfh.so "$WORK_DIR/sqlite/"; \
     \
     printf "Compiling COBOL programs...\n"; \
-    cd /work/demo; \
+    cd /work/extfh/demo; \
     cobc -x -fcallfh=czippfh cobol/ls_to_idx.cob -L"$WORK_DIR/vbisam" -lextfh -o "$WORK_DIR/ls_to_idx"; \
     cobc -x -fcallfh=czippfh cobol/idx_to_ls.cob -L"$WORK_DIR/vbisam" -lextfh -o "$WORK_DIR/idx_to_ls"; \
     \
@@ -65,8 +65,19 @@ podman run --rm -t \
     cd "$WORK_DIR/sqlite"; \
     "$WORK_DIR/ls_to_idx"; \
     \
+    printf "Preparing COBOL4J tools...\n"; \
+    COBOL4J_DIR="$WORK_DIR/cobol4j"; \
+    COBOL4J_BIN="$COBOL4J_DIR/libcobj/bin/cobj-idx-test"; \
+    COBOL4J_JAR="$COBOL4J_DIR/libcobj/app/build/libs/libcobj.jar"; \
+    if [ ! -x "$COBOL4J_BIN" ] || [ ! -f "$COBOL4J_JAR" ]; then \
+      rm -rf "$COBOL4J_DIR"; \
+      git clone --depth 1 https://github.com/opensourcecobol/opensourcecobol4j "$COBOL4J_DIR"; \
+      cd "$COBOL4J_DIR/libcobj"; \
+      ./gradlew -q shadowJar; \
+    fi; \
+    \
     printf "Step 4: COBOL4J unload -> line sequential\n"; \
-    /work/opensourcecobol4j/libcobj/bin/cobj-idx-test unload "$WORK_DIR/sqlite/indexed.db" "$WORK_DIR/sqlite/from_cobol4j.txt"; \
+    "$COBOL4J_BIN" unload "$WORK_DIR/sqlite/indexed.db" "$WORK_DIR/sqlite/from_cobol4j.txt"; \
     \
     printf "Verifying output...\n"; \
     in_file="$WORK_DIR/vbisam/input.txt"; \
