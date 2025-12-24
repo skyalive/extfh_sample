@@ -59,7 +59,7 @@ fn sliceFromCConst(ptr: [*c]const u8, len: usize) []const u8 {
     return @as([*]const u8, @ptrCast(ptr))[0..len];
 }
 
-pub export fn gvbisam_open(path: [*c]const u8, mode: c_int, key_offset: usize, key_size: usize, out_handle: *?*GoVbisamHandle) c_int {
+pub export fn gvbisam_open(path: [*c]const u8, mode: c_int, key_offset: usize, key_size: usize, out_handle: ?*?*GoVbisamHandle) c_int {
     if (path == null or out_handle == null) return @intFromEnum(ErrCode.invalid_arg);
     const open_mode = mapOpenMode(mode) orelse return @intFromEnum(ErrCode.invalid_arg);
 
@@ -75,11 +75,11 @@ pub export fn gvbisam_open(path: [*c]const u8, mode: c_int, key_offset: usize, k
 
     const ctx = allocator.create(GoVbisamHandle) catch return @intFromEnum(ErrCode.io_error);
     ctx.* = .{ .backend = backend, .handle = handle };
-    out_handle.* = ctx;
+    out_handle.?.* = ctx;
     return @intFromEnum(ErrCode.ok);
 }
 
-pub export fn gvbisam_create(path: [*c]const u8, mode: c_int, record_size: usize, key_offset: usize, key_size: usize, out_handle: *?*GoVbisamHandle) c_int {
+pub export fn gvbisam_create(path: [*c]const u8, mode: c_int, record_size: usize, key_offset: usize, key_size: usize, out_handle: ?*?*GoVbisamHandle) c_int {
     if (path == null or out_handle == null or record_size == 0 or key_size == 0) {
         return @intFromEnum(ErrCode.invalid_arg);
     }
@@ -95,83 +95,87 @@ pub export fn gvbisam_create(path: [*c]const u8, mode: c_int, record_size: usize
 
     const ctx = allocator.create(GoVbisamHandle) catch return @intFromEnum(ErrCode.io_error);
     ctx.* = .{ .backend = backend, .handle = handle };
-    out_handle.* = ctx;
+    out_handle.?.* = ctx;
     return @intFromEnum(ErrCode.ok);
 }
 
-pub export fn gvbisam_close(ctx: *GoVbisamHandle) c_int {
-    if (ctx == null) return @intFromEnum(ErrCode.invalid_arg);
+pub export fn gvbisam_close(ctx: ?*GoVbisamHandle) c_int {
+    const ctx_ptr = ctx orelse return @intFromEnum(ErrCode.invalid_arg);
     const allocator = std.heap.c_allocator;
-    ctx.backend.close(ctx.handle) catch |err| return errToCode(err);
-    ctx.backend.deinit();
-    allocator.destroy(ctx);
+    ctx_ptr.backend.close(ctx_ptr.handle) catch |err| return errToCode(err);
+    ctx_ptr.backend.deinit();
+    allocator.destroy(ctx_ptr);
     return @intFromEnum(ErrCode.ok);
 }
 
-pub export fn gvbisam_record_size(ctx: *GoVbisamHandle) usize {
-    if (ctx == null) return 0;
-    return ctx.handle.record_size;
+pub export fn gvbisam_record_size(ctx: ?*GoVbisamHandle) usize {
+    const ctx_ptr = ctx orelse return 0;
+    return ctx_ptr.handle.record_size;
 }
 
-pub export fn gvbisam_key_offset(ctx: *GoVbisamHandle) usize {
-    if (ctx == null) return 0;
-    return ctx.handle.key_offset;
+pub export fn gvbisam_key_offset(ctx: ?*GoVbisamHandle) usize {
+    const ctx_ptr = ctx orelse return 0;
+    return ctx_ptr.handle.key_offset;
 }
 
-pub export fn gvbisam_key_size(ctx: *GoVbisamHandle) usize {
-    if (ctx == null) return 0;
-    return ctx.handle.key_size;
+pub export fn gvbisam_key_size(ctx: ?*GoVbisamHandle) usize {
+    const ctx_ptr = ctx orelse return 0;
+    return ctx_ptr.handle.key_size;
 }
 
-pub export fn gvbisam_read(ctx: *GoVbisamHandle, buffer: [*c]u8, buffer_len: usize, mode: c_int, out_len: ?*usize) c_int {
-    if (ctx == null or buffer == null) return @intFromEnum(ErrCode.invalid_arg);
+pub export fn gvbisam_read(ctx: ?*GoVbisamHandle, buffer: [*c]u8, buffer_len: usize, mode: c_int, out_len: ?*usize) c_int {
+    if (buffer == null) return @intFromEnum(ErrCode.invalid_arg);
+    const ctx_ptr = ctx orelse return @intFromEnum(ErrCode.invalid_arg);
     const read_mode = mapReadMode(mode) orelse return @intFromEnum(ErrCode.invalid_arg);
-    if (buffer_len < ctx.handle.record_size) return @intFromEnum(ErrCode.invalid_arg);
+    if (buffer_len < ctx_ptr.handle.record_size) return @intFromEnum(ErrCode.invalid_arg);
 
-    const slice = sliceFromC(buffer, ctx.handle.record_size);
-    ctx.backend.read(ctx.handle, slice, read_mode) catch |err| return errToCode(err);
-    if (out_len) |ptr| ptr.* = ctx.handle.record_size;
+    const slice = sliceFromC(buffer, ctx_ptr.handle.record_size);
+    ctx_ptr.backend.read(ctx_ptr.handle, slice, read_mode) catch |err| return errToCode(err);
+    if (out_len) |ptr| ptr.* = ctx_ptr.handle.record_size;
     return @intFromEnum(ErrCode.ok);
 }
 
-pub export fn gvbisam_read_key(ctx: *GoVbisamHandle, key_ptr: [*c]const u8, key_len: usize, buffer: [*c]u8, buffer_len: usize, out_len: ?*usize) c_int {
-    if (ctx == null or key_ptr == null or buffer == null) return @intFromEnum(ErrCode.invalid_arg);
-    if (ctx.handle.key_size == 0 or ctx.handle.key_size != key_len) return @intFromEnum(ErrCode.invalid_arg);
-    if (buffer_len < ctx.handle.record_size) return @intFromEnum(ErrCode.invalid_arg);
+pub export fn gvbisam_read_key(ctx: ?*GoVbisamHandle, key_ptr: [*c]const u8, key_len: usize, buffer: [*c]u8, buffer_len: usize, out_len: ?*usize) c_int {
+    if (key_ptr == null or buffer == null) return @intFromEnum(ErrCode.invalid_arg);
+    const ctx_ptr = ctx orelse return @intFromEnum(ErrCode.invalid_arg);
+    if (ctx_ptr.handle.key_size == 0 or ctx_ptr.handle.key_size != key_len) return @intFromEnum(ErrCode.invalid_arg);
+    if (buffer_len < ctx_ptr.handle.record_size) return @intFromEnum(ErrCode.invalid_arg);
 
     const key = sliceFromCConst(key_ptr, key_len);
-    const slice = sliceFromC(buffer, ctx.handle.record_size);
+    const slice = sliceFromC(buffer, ctx_ptr.handle.record_size);
 
-    ctx.backend.start(ctx.handle, key, .EQUAL) catch |err| return errToCode(err);
-    ctx.backend.read(ctx.handle, slice, .NEXT) catch |err| return errToCode(err);
+    ctx_ptr.backend.start(ctx_ptr.handle, key, .EQUAL) catch |err| return errToCode(err);
+    ctx_ptr.backend.read(ctx_ptr.handle, slice, .NEXT) catch |err| return errToCode(err);
 
-    if (ctx.handle.key_offset + ctx.handle.key_size <= slice.len) {
-        const rec_key = slice[ctx.handle.key_offset .. ctx.handle.key_offset + ctx.handle.key_size];
+    if (ctx_ptr.handle.key_offset + ctx_ptr.handle.key_size <= slice.len) {
+        const rec_key = slice[ctx_ptr.handle.key_offset .. ctx_ptr.handle.key_offset + ctx_ptr.handle.key_size];
         if (!std.mem.eql(u8, rec_key, key)) return @intFromEnum(ErrCode.not_found);
     }
 
-    if (out_len) |ptr| ptr.* = ctx.handle.record_size;
+    if (out_len) |ptr| ptr.* = ctx_ptr.handle.record_size;
     return @intFromEnum(ErrCode.ok);
 }
 
-pub export fn gvbisam_write(ctx: *GoVbisamHandle, buffer: [*c]const u8, buffer_len: usize) c_int {
-    if (ctx == null or buffer == null) return @intFromEnum(ErrCode.invalid_arg);
-    if (buffer_len < ctx.handle.record_size) return @intFromEnum(ErrCode.invalid_arg);
-    const slice = sliceFromCConst(buffer, ctx.handle.record_size);
-    ctx.backend.write(ctx.handle, slice) catch |err| return errToCode(err);
+pub export fn gvbisam_write(ctx: ?*GoVbisamHandle, buffer: [*c]const u8, buffer_len: usize) c_int {
+    if (buffer == null) return @intFromEnum(ErrCode.invalid_arg);
+    const ctx_ptr = ctx orelse return @intFromEnum(ErrCode.invalid_arg);
+    if (buffer_len < ctx_ptr.handle.record_size) return @intFromEnum(ErrCode.invalid_arg);
+    const slice = sliceFromCConst(buffer, ctx_ptr.handle.record_size);
+    ctx_ptr.backend.write(ctx_ptr.handle, slice) catch |err| return errToCode(err);
     return @intFromEnum(ErrCode.ok);
 }
 
-pub export fn gvbisam_rewrite(ctx: *GoVbisamHandle, buffer: [*c]const u8, buffer_len: usize) c_int {
-    if (ctx == null or buffer == null) return @intFromEnum(ErrCode.invalid_arg);
-    if (buffer_len < ctx.handle.record_size) return @intFromEnum(ErrCode.invalid_arg);
-    const slice = sliceFromCConst(buffer, ctx.handle.record_size);
-    ctx.backend.rewrite(ctx.handle, slice) catch |err| return errToCode(err);
+pub export fn gvbisam_rewrite(ctx: ?*GoVbisamHandle, buffer: [*c]const u8, buffer_len: usize) c_int {
+    if (buffer == null) return @intFromEnum(ErrCode.invalid_arg);
+    const ctx_ptr = ctx orelse return @intFromEnum(ErrCode.invalid_arg);
+    if (buffer_len < ctx_ptr.handle.record_size) return @intFromEnum(ErrCode.invalid_arg);
+    const slice = sliceFromCConst(buffer, ctx_ptr.handle.record_size);
+    ctx_ptr.backend.rewrite(ctx_ptr.handle, slice) catch |err| return errToCode(err);
     return @intFromEnum(ErrCode.ok);
 }
 
-pub export fn gvbisam_delete(ctx: *GoVbisamHandle) c_int {
-    if (ctx == null) return @intFromEnum(ErrCode.invalid_arg);
-    ctx.backend.delete(ctx.handle) catch |err| return errToCode(err);
+pub export fn gvbisam_delete(ctx: ?*GoVbisamHandle) c_int {
+    const ctx_ptr = ctx orelse return @intFromEnum(ErrCode.invalid_arg);
+    ctx_ptr.backend.delete(ctx_ptr.handle) catch |err| return errToCode(err);
     return @intFromEnum(ErrCode.ok);
 }

@@ -13,7 +13,16 @@ const std = @import("std");
 const cob = @cImport({
     @cInclude("gnucobol_common.h");
 });
-extern fn cob_set_exception(id: c_int) void;
+const builtin = @import("builtin");
+const CobException = if (builtin.os.tag == .linux) struct {
+    extern fn cob_set_exception(id: c_int) void;
+
+    pub fn clear() void {
+        cob_set_exception(0);
+    }
+} else struct {
+    pub fn clear() void {}
+};
 // Abstraction layer imports (ISAM backend-independent interface)
 const isam = @import("isam_interface.zig");
 const build_options = @import("build_options");
@@ -634,8 +643,8 @@ fn handleClose(fcd: *FCD3) void {
 
     fcd.handle = 0;
     fcd.status = 0; // Success
-    if (!@import("builtin").is_test) {
-        cob_set_exception(0);
+    if (!builtin.is_test) {
+        CobException.clear();
     }
 }
 
