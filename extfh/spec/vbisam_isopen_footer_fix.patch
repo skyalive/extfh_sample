@@ -1,5 +1,5 @@
 From 8a1e7bd092f9db6cc527719f8e574cf228ae0149 Mon Sep 17 00:00:00 2001
-From: skyalive <uemon2010@gmail.com>
+From: skyalive <>
 Date: Wed, 24 Dec 2025 09:51:22 +0900
 Subject: [PATCH] Fix keydesc footer check for unsigned char
 
