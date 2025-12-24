@@ -428,8 +428,8 @@ isopen (const char *pcfilename, int imode)
 			goto open_err;
 		}
 		pctemp = cvbnodetmp;
-		if (*(cvbnodetmp + psvbptr->inodesize - 3) != -1
-		    || *(cvbnodetmp + psvbptr->inodesize - 2) != 0x7e) {
+		if ((unsigned char)*(cvbnodetmp + psvbptr->inodesize - 3) != 0xff
+		    || (unsigned char)*(cvbnodetmp + psvbptr->inodesize - 2) != 0x7e) {
 			goto open_err;
 		}
 		ilengthused = inl_ldint (pctemp);
