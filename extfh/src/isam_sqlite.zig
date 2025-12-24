@@ -1,27 +1,11 @@
 const std = @import("std");
-const sqlite3 = @cImport({
-    @cInclude("sqlite3.h");
-});
+const sqlite3 = @import("sqlite3.zig").c;
 const isam = @import("isam_interface.zig");
+const schema = @import("isam_sqlite_schema.zig");
 
 // =============================================================================
-// SQLite Backend for ISAM Abstraction Layer
+// SQLite Backend for ISAM Abstraction Layer (COBOL4J-compatible schema)
 // =============================================================================
-//
-// Provides SQLite-based implementation of ISAM operations, enabling
-// complete file format compatibility with OpenCOBOL4J.
-//
-// File Format:
-// - Primary key stored in BLOB
-// - Record values stored in BLOB (fixed-size COBOL records)
-// - Alternate keys in separate tables
-// - Metadata stored in dedicated tables
-//
-// Lock Management:
-// - Record-level locks via locked_by (UUID) and process_id
-// - Soft deletes via deleted flag (0=active, 1=deleted)
-// - File-level lock tracking
-//
 
 pub const SqliteBackend = struct {
     const Self = @This();
@@ -29,8 +13,7 @@ pub const SqliteBackend = struct {
     allocator: std.mem.Allocator,
     db: ?*sqlite3.sqlite3,
     db_path: []const u8,
-    current_key: ?[]const u8,
-    current_offset: i64,
+    current_key: ?[]u8,
     open_mode: isam.OpenMode,
     record_size: usize,
     key_offset: usize,
@@ -38,48 +21,23 @@ pub const SqliteBackend = struct {
 
     /// Initialize SQLite backend
     pub fn init(allocator: std.mem.Allocator, db_path: []const u8) !Self {
-        var db: ?*sqlite3.sqlite3 = null;
-
-        const rc = sqlite3.sqlite3_open_v2(
-            @ptrCast(db_path.ptr),
-            &db,
-            sqlite3.SQLITE_OPEN_READWRITE | sqlite3.SQLITE_OPEN_CREATE,
-            null,
-        );
-
-        if (rc != sqlite3.SQLITE_OK) {
-            return error.SqliteOpenFailed;
-        }
-
-        // Enable foreign keys
-        _ = sqlite3.sqlite3_exec(
-            db.?,
-            "PRAGMA foreign_keys = ON;",
-            null,
-            null,
-            null,
-        );
-
-        const db_path_copy = try allocator.dupe(u8, db_path);
-
-        return .{
+        var self = Self{
             .allocator = allocator,
-            .db = db,
-            .db_path = db_path_copy,
+            .db = null,
+            .db_path = try allocator.dupe(u8, db_path),
             .current_key = null,
-            .current_offset = 0,
             .open_mode = .INPUT,
             .record_size = 0,
             .key_offset = 0,
             .key_size = 0,
         };
+        try self.openDb(db_path);
+        return self;
     }
 
     /// Deinitialize and cleanup
     pub fn deinit(self: *Self) void {
-        if (self.db) |db| {
-            _ = sqlite3.sqlite3_close(db);
-        }
+        self.closeDb();
         if (self.current_key) |key| {
             self.allocator.free(key);
         }
@@ -89,271 +47,235 @@ pub const SqliteBackend = struct {
     /// Open a SQLite-based INDEXED file
     pub fn open(self: *Self, filename: []const u8, mode: isam.OpenMode) isam.IsamError!isam.IsamFileHandle {
         self.open_mode = mode;
-        self.allocator.free(self.db_path);
-        self.db_path = self.allocator.dupe(u8, filename) catch return error.IoError;
+        self.clearCurrentKey();
+        try self.openDb(filename);
 
-        // Ensure schema exists
-        try self.ensureSchema();
+        const mgr = schema.SchemaManager.init(self.allocator, self.db.?);
+        try mgr.ensureBaseSchema();
+
+        const record_size = try mgr.getRecordSize();
+        const key_info = try mgr.getPrimaryKeyInfo();
+
+        self.record_size = record_size;
+        self.key_offset = key_info.key_offset;
+        self.key_size = key_info.key_size;
 
         return isam.IsamFileHandle{
             .backend_type = .SQLITE,
-            .handle = 1, // Dummy handle for SQLite (uses filename)
-            .record_size = self.record_size,
-            .key_offset = self.key_offset,
-            .key_size = self.key_size,
+            .handle = 1,
+            .record_size = record_size,
+            .key_offset = key_info.key_offset,
+            .key_size = key_info.key_size,
         };
     }
 
     /// Close SQLite file
     pub fn close(self: *Self, _: isam.IsamFileHandle) isam.IsamError!void {
-        // SQLite file closes automatically, but we could flush here
-        if (self.db) |db| {
-            const rc = sqlite3.sqlite3_exec(db, "COMMIT;", null, null, null);
-            if (rc != sqlite3.SQLITE_OK) {
-                return error.IoError;
-            }
-        }
+        self.closeDb();
     }
 
-    /// Read a record by key
-    pub fn read(self: *Self, _: isam.IsamFileHandle, buffer: []u8, mode: isam.ReadMode) isam.IsamError!void {
-        if (self.db == null) {
-            return error.IoError;
-        }
+    /// Read a record
+    pub fn read(self: *Self, handle: isam.IsamFileHandle, buffer: []u8, mode: isam.ReadMode) isam.IsamError!void {
+        if (self.db == null) return error.IoError;
 
         const db = self.db.?;
+        const key_from_buffer = blk: {
+            if (handle.key_offset + handle.key_size > buffer.len) {
+                return error.IoError;
+            }
+            break :blk buffer[handle.key_offset .. handle.key_offset + handle.key_size];
+        };
 
-        // Build SQL query based on read mode
-        const sql: []const u8 = switch (mode) {
-            .FIRST => "SELECT value FROM table0 WHERE deleted = 0 ORDER BY key ASC LIMIT 1",
-            .LAST => "SELECT value FROM table0 WHERE deleted = 0 ORDER BY key DESC LIMIT 1",
-            .NEXT => blk: {
-                if (self.current_key == null) {
-                    break :blk "SELECT value FROM table0 WHERE deleted = 0 ORDER BY key ASC LIMIT 1";
-                } else {
-                    // For now, just read first - TODO: implement proper cursor
-                    break :blk "SELECT value FROM table0 WHERE deleted = 0 ORDER BY key ASC LIMIT 1";
-                }
-            },
-            .PREVIOUS => blk: {
-                if (self.current_key == null) {
-                    break :blk "SELECT value FROM table0 WHERE deleted = 0 ORDER BY key DESC LIMIT 1";
-                } else {
-                    // For now, just read last - TODO: implement proper cursor
-                    break :blk "SELECT value FROM table0 WHERE deleted = 0 ORDER BY key DESC LIMIT 1";
-                }
-            },
-            .EQUAL => return error.NotSupported, // Requires key parameter
-            .GREATER_EQUAL => return error.NotSupported,
-            .GREATER => return error.NotSupported,
+        const sql = switch (mode) {
+            .FIRST => "SELECT key, value FROM table0 WHERE deleted = 0 ORDER BY key ASC LIMIT 1",
+            .LAST => "SELECT key, value FROM table0 WHERE deleted = 0 ORDER BY key DESC LIMIT 1",
+            .NEXT => if (self.current_key == null)
+                "SELECT key, value FROM table0 WHERE deleted = 0 ORDER BY key ASC LIMIT 1"
+            else
+                "SELECT key, value FROM table0 WHERE deleted = 0 AND key > ? ORDER BY key ASC LIMIT 1",
+            .PREVIOUS => if (self.current_key == null)
+                "SELECT key, value FROM table0 WHERE deleted = 0 ORDER BY key DESC LIMIT 1"
+            else
+                "SELECT key, value FROM table0 WHERE deleted = 0 AND key < ? ORDER BY key DESC LIMIT 1",
+            .EQUAL => "SELECT key, value FROM table0 WHERE deleted = 0 AND key = ?",
+            .GREATER_EQUAL => "SELECT key, value FROM table0 WHERE deleted = 0 AND key >= ? ORDER BY key ASC LIMIT 1",
+            .GREATER => "SELECT key, value FROM table0 WHERE deleted = 0 AND key > ? ORDER BY key ASC LIMIT 1",
+        };
+
+        const bind_key = switch (mode) {
+            .NEXT, .PREVIOUS => self.current_key,
+            .EQUAL, .GREATER_EQUAL, .GREATER => key_from_buffer,
+            else => null,
+        };
+
+        const not_found_error = switch (mode) {
+            .EQUAL, .GREATER_EQUAL, .GREATER => error.NotFound,
+            else => error.EndOfFile,
         };
 
         var stmt: ?*sqlite3.sqlite3_stmt = null;
         var rc = sqlite3.sqlite3_prepare_v2(db, @ptrCast(sql.ptr), @intCast(sql.len), &stmt, null);
-
-        if (rc != sqlite3.SQLITE_OK) {
-            return error.IoError;
-        }
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
         defer _ = sqlite3.sqlite3_finalize(stmt.?);
 
-        rc = sqlite3.sqlite3_step(stmt.?);
-
-        if (rc == sqlite3.SQLITE_ROW) {
-            const blob = sqlite3.sqlite3_column_blob(stmt.?, 0);
-            const blob_len = sqlite3.sqlite3_column_bytes(stmt.?, 0);
-
-            if (blob != null and blob_len > 0) {
-                const src: [*]const u8 = @ptrCast(blob);
-                const copy_len = @min(buffer.len, @as(usize, @intCast(blob_len)));
-                @memcpy(buffer[0..copy_len], src[0..copy_len]);
-            }
-        } else if (rc == sqlite3.SQLITE_DONE) {
-            return error.EndOfFile;
-        } else {
-            return error.IoError;
+        if (bind_key) |key| {
+            rc = sqlite3.sqlite3_bind_blob(stmt.?, 1, @ptrCast(key.ptr), @intCast(key.len), sqlite3.SQLITE_STATIC);
+            if (rc != sqlite3.SQLITE_OK) return error.IoError;
         }
+
+        rc = sqlite3.sqlite3_step(stmt.?);
+        if (rc == sqlite3.SQLITE_ROW) {
+            const key_blob = sqlite3.sqlite3_column_blob(stmt.?, 0);
+            const key_len = sqlite3.sqlite3_column_bytes(stmt.?, 0);
+            const value_blob = sqlite3.sqlite3_column_blob(stmt.?, 1);
+            const value_len = sqlite3.sqlite3_column_bytes(stmt.?, 1);
+
+            if (key_blob == null or value_blob == null) return error.IoError;
+            const key_src: [*]const u8 = @ptrCast(key_blob);
+            const value_src: [*]const u8 = @ptrCast(value_blob);
+
+            try self.updateCurrentKey(key_src[0..@intCast(key_len)]);
+            const copy_len = @min(buffer.len, @as(usize, @intCast(value_len)));
+            @memcpy(buffer[0..copy_len], value_src[0..copy_len]);
+            return;
+        }
+
+        if (rc == sqlite3.SQLITE_DONE) return not_found_error;
+        return error.IoError;
     }
 
     /// Write a new record
     pub fn write(self: *Self, handle: isam.IsamFileHandle, buffer: []const u8) isam.IsamError!void {
-        if (self.db == null) {
-            return error.IoError;
-        }
+        if (self.db == null) return error.IoError;
 
         const db = self.db.?;
 
-        // Extract key from buffer
         if (handle.key_offset + handle.key_size > buffer.len) {
             return error.IoError;
         }
 
         const key = buffer[handle.key_offset .. handle.key_offset + handle.key_size];
-
-        // Insert record
         const sql = "INSERT INTO table0 (key, value, deleted) VALUES (?, ?, 0)";
 
         var stmt: ?*sqlite3.sqlite3_stmt = null;
         var rc = sqlite3.sqlite3_prepare_v2(db, @ptrCast(sql.ptr), @intCast(sql.len), &stmt, null);
-
-        if (rc != sqlite3.SQLITE_OK) {
-            return error.IoError;
-        }
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
         defer _ = sqlite3.sqlite3_finalize(stmt.?);
 
-        // Bind key
         rc = sqlite3.sqlite3_bind_blob(stmt.?, 1, @ptrCast(key.ptr), @intCast(key.len), sqlite3.SQLITE_STATIC);
-        if (rc != sqlite3.SQLITE_OK) {
-            return error.IoError;
-        }
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
 
-        // Bind value
         rc = sqlite3.sqlite3_bind_blob(stmt.?, 2, @ptrCast(buffer.ptr), @intCast(buffer.len), sqlite3.SQLITE_STATIC);
-        if (rc != sqlite3.SQLITE_OK) {
-            return error.IoError;
-        }
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
 
         rc = sqlite3.sqlite3_step(stmt.?);
-
-        if (rc == sqlite3.SQLITE_CONSTRAINT) {
-            return error.Duplicate;
-        } else if (rc != sqlite3.SQLITE_DONE) {
-            return error.IoError;
-        }
+        if (rc == sqlite3.SQLITE_CONSTRAINT) return error.Duplicate;
+        if (rc != sqlite3.SQLITE_DONE) return error.IoError;
     }
 
     /// Rewrite (update) current record
     pub fn rewrite(self: *Self, _: isam.IsamFileHandle, buffer: []const u8) isam.IsamError!void {
-        if (self.db == null or self.current_key == null) {
-            return error.IoError;
-        }
+        if (self.db == null or self.current_key == null) return error.IoError;
 
         const db = self.db.?;
-
         const sql = "UPDATE table0 SET value = ? WHERE key = ? AND deleted = 0";
 
         var stmt: ?*sqlite3.sqlite3_stmt = null;
         var rc = sqlite3.sqlite3_prepare_v2(db, @ptrCast(sql.ptr), @intCast(sql.len), &stmt, null);
-
-        if (rc != sqlite3.SQLITE_OK) {
-            return error.IoError;
-        }
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
         defer _ = sqlite3.sqlite3_finalize(stmt.?);
 
-        // Bind value
         rc = sqlite3.sqlite3_bind_blob(stmt.?, 1, @ptrCast(buffer.ptr), @intCast(buffer.len), sqlite3.SQLITE_STATIC);
-        if (rc != sqlite3.SQLITE_OK) {
-            return error.IoError;
-        }
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
 
-        // Bind key
         rc = sqlite3.sqlite3_bind_blob(stmt.?, 2, @ptrCast(self.current_key.?.ptr), @intCast(self.current_key.?.len), sqlite3.SQLITE_STATIC);
-        if (rc != sqlite3.SQLITE_OK) {
-            return error.IoError;
-        }
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
 
         rc = sqlite3.sqlite3_step(stmt.?);
-
-        if (rc != sqlite3.SQLITE_DONE) {
-            return error.IoError;
-        }
+        if (rc != sqlite3.SQLITE_DONE) return error.IoError;
+        if (sqlite3.sqlite3_changes(db) == 0) return error.NotFound;
     }
 
     /// Delete current record (soft delete)
     pub fn delete(self: *Self, _: isam.IsamFileHandle) isam.IsamError!void {
-        if (self.db == null or self.current_key == null) {
-            return error.IoError;
-        }
+        if (self.db == null or self.current_key == null) return error.IoError;
 
         const db = self.db.?;
-
         const sql = "UPDATE table0 SET deleted = 1 WHERE key = ?";
 
         var stmt: ?*sqlite3.sqlite3_stmt = null;
         var rc = sqlite3.sqlite3_prepare_v2(db, @ptrCast(sql.ptr), @intCast(sql.len), &stmt, null);
-
-        if (rc != sqlite3.SQLITE_OK) {
-            return error.IoError;
-        }
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
         defer _ = sqlite3.sqlite3_finalize(stmt.?);
 
-        // Bind key
         rc = sqlite3.sqlite3_bind_blob(stmt.?, 1, @ptrCast(self.current_key.?.ptr), @intCast(self.current_key.?.len), sqlite3.SQLITE_STATIC);
-        if (rc != sqlite3.SQLITE_OK) {
-            return error.IoError;
-        }
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
 
         rc = sqlite3.sqlite3_step(stmt.?);
-
-        if (rc != sqlite3.SQLITE_DONE) {
-            return error.IoError;
-        }
+        if (rc != sqlite3.SQLITE_DONE) return error.IoError;
+        if (sqlite3.sqlite3_changes(db) == 0) return error.NotFound;
     }
 
     /// Start reading by key
-    pub fn start(self: *Self, _: isam.IsamFileHandle, key: []const u8, _: isam.ReadMode) isam.IsamError!void {
-        if (self.db == null) {
-            return error.IoError;
-        }
+    pub fn start(self: *Self, _: isam.IsamFileHandle, key: []const u8, mode: isam.ReadMode) isam.IsamError!void {
+        if (self.db == null) return error.IoError;
 
         const db = self.db.?;
-
-        const sql = "SELECT value FROM table0 WHERE key = ? AND deleted = 0";
+        const sql = switch (mode) {
+            .EQUAL => "SELECT key FROM table0 WHERE deleted = 0 AND key = ? LIMIT 1",
+            .GREATER_EQUAL => "SELECT key FROM table0 WHERE deleted = 0 AND key >= ? ORDER BY key ASC LIMIT 1",
+            .GREATER => "SELECT key FROM table0 WHERE deleted = 0 AND key > ? ORDER BY key ASC LIMIT 1",
+            else => return error.NotSupported,
+        };
 
         var stmt: ?*sqlite3.sqlite3_stmt = null;
         var rc = sqlite3.sqlite3_prepare_v2(db, @ptrCast(sql.ptr), @intCast(sql.len), &stmt, null);
-
-        if (rc != sqlite3.SQLITE_OK) {
-            return error.IoError;
-        }
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
         defer _ = sqlite3.sqlite3_finalize(stmt.?);
 
-        // Bind key
         rc = sqlite3.sqlite3_bind_blob(stmt.?, 1, @ptrCast(key.ptr), @intCast(key.len), sqlite3.SQLITE_STATIC);
-        if (rc != sqlite3.SQLITE_OK) {
-            return error.IoError;
-        }
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
 
         rc = sqlite3.sqlite3_step(stmt.?);
-
         if (rc == sqlite3.SQLITE_ROW) {
-            // Store current key
-            if (self.current_key) |old_key| {
-                self.allocator.free(old_key);
-            }
-            self.current_key = self.allocator.dupe(u8, key) catch return error.IoError;
-        } else {
-            return error.NotFound;
+            const key_blob = sqlite3.sqlite3_column_blob(stmt.?, 0);
+            const key_len = sqlite3.sqlite3_column_bytes(stmt.?, 0);
+            if (key_blob == null) return error.IoError;
+            const key_src: [*]const u8 = @ptrCast(key_blob);
+            try self.updateCurrentKey(key_src[0..@intCast(key_len)]);
+            return;
         }
+
+        if (rc == sqlite3.SQLITE_DONE) return error.NotFound;
+        return error.IoError;
     }
 
     /// Lock a file/record
-    pub fn lock(self: *Self, _: isam.IsamFileHandle, mode: isam.LockMode) isam.IsamError!void {
-        if (self.db == null) {
-            return error.IoError;
-        }
-
-        // For SQLite, we could implement record locking via metadata
-        // For now, this is a no-op as SQLite handles locking at transaction level
-        _ = mode;
+    pub fn lock(_: *Self, _: isam.IsamFileHandle, _: isam.LockMode) isam.IsamError!void {
+        // SQLite handles locking at transaction level
     }
 
     /// Unlock a file/record
     pub fn unlock(_: *Self, _: isam.IsamFileHandle) isam.IsamError!void {
-        // SQLite releases locks automatically when transaction ends
+        // SQLite releases locks automatically
     }
 
     /// Create a new INDEXED file
     pub fn create(self: *Self, filename: []const u8, mode: isam.OpenMode, record_size: usize, key_offset: usize, key_size: usize) isam.IsamError!isam.IsamFileHandle {
+        if (mode == .OUTPUT) {
+            std.fs.cwd().deleteFile(filename) catch {};
+        }
+
+        self.open_mode = mode;
+        self.clearCurrentKey();
+        try self.openDb(filename);
+
+        const mgr = schema.SchemaManager.init(self.allocator, self.db.?);
+        try mgr.createSchema(record_size, key_offset, key_size, 1);
+
         self.record_size = record_size;
         self.key_offset = key_offset;
         self.key_size = key_size;
-        self.open_mode = mode;
-
-        self.allocator.free(self.db_path);
-        self.db_path = self.allocator.dupe(u8, filename) catch return error.IoError;
-
-        // Ensure schema exists
-        try self.ensureSchema();
 
         return isam.IsamFileHandle{
             .backend_type = .SQLITE,
@@ -364,61 +286,45 @@ pub const SqliteBackend = struct {
         };
     }
 
-    /// Ensure SQLite schema exists (create if needed)
-    fn ensureSchema(self: *Self) isam.IsamError!void {
-        if (self.db == null) {
-            return error.IoError;
+    fn openDb(self: *Self, db_path: []const u8) isam.IsamError!void {
+        self.closeDb();
+
+        const db_path_z = self.allocator.dupeZ(u8, db_path) catch return error.IoError;
+        defer self.allocator.free(db_path_z);
+
+        var db: ?*sqlite3.sqlite3 = null;
+        const rc = sqlite3.sqlite3_open_v2(
+            @ptrCast(db_path_z.ptr),
+            &db,
+            sqlite3.SQLITE_OPEN_READWRITE | sqlite3.SQLITE_OPEN_CREATE,
+            null,
+        );
+        if (rc != sqlite3.SQLITE_OK or db == null) return error.IoError;
+
+        _ = sqlite3.sqlite3_exec(db.?, "PRAGMA foreign_keys = ON;", null, null, null);
+
+        self.db = db;
+        self.allocator.free(self.db_path);
+        self.db_path = self.allocator.dupe(u8, db_path) catch return error.IoError;
+    }
+
+    fn closeDb(self: *Self) void {
+        if (self.db) |db| {
+            _ = sqlite3.sqlite3_close(db);
         }
+        self.db = null;
+    }
 
-        const db = self.db.?;
-
-        // Create primary key table (table0)
-        const create_table0 =
-            \\CREATE TABLE IF NOT EXISTS table0 (
-            \\  key BLOB PRIMARY KEY,
-            \\  value BLOB NOT NULL,
-            \\  locked_by TEXT,
-            \\  process_id TEXT,
-            \\  locked_at TIMESTAMP,
-            \\  deleted INTEGER DEFAULT 0
-            \\);
-        ;
-
-        var rc = sqlite3.sqlite3_exec(db, @ptrCast(create_table0.ptr), null, null, null);
-
-        if (rc != sqlite3.SQLITE_OK) {
-            return error.IoError;
+    fn clearCurrentKey(self: *Self) void {
+        if (self.current_key) |key| {
+            self.allocator.free(key);
         }
+        self.current_key = null;
+    }
 
-        // Create metadata tables
-        const create_metadata =
-            \\CREATE TABLE IF NOT EXISTS metadata_string_int (
-            \\  key TEXT PRIMARY KEY,
-            \\  value INT
-            \\);
-        ;
-
-        rc = sqlite3.sqlite3_exec(db, @ptrCast(create_metadata.ptr), null, null, null);
-
-        if (rc != sqlite3.SQLITE_OK) {
-            return error.IoError;
-        }
-
-        const create_metadata_key =
-            \\CREATE TABLE IF NOT EXISTS metadata_key (
-            \\  key_number INT PRIMARY KEY,
-            \\  key_offset INT,
-            \\  key_size INT,
-            \\  allow_duplicates INT,
-            \\  key_type TEXT
-            \\);
-        ;
-
-        rc = sqlite3.sqlite3_exec(db, @ptrCast(create_metadata_key.ptr), null, null, null);
-
-        if (rc != sqlite3.SQLITE_OK) {
-            return error.IoError;
-        }
+    fn updateCurrentKey(self: *Self, key: []const u8) isam.IsamError!void {
+        self.clearCurrentKey();
+        self.current_key = self.allocator.dupe(u8, key) catch return error.IoError;
     }
 };
 

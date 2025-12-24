@@ -28,6 +28,8 @@ cobc -x -fcallfh=czippfh src/sample.cob -L"$ZIG_OUT" -lextfh -o sample_app
 echo "Running sample_app..."
 export DYLD_LIBRARY_PATH="$ZIG_OUT:$DYLD_LIBRARY_PATH"
 export LD_LIBRARY_PATH="$ZIG_OUT:$LD_LIBRARY_PATH"
+export DD_TESTFILE="testfile.isam"
+export SEQFILE="seqfile.txt"
 
 ./sample_app
 
