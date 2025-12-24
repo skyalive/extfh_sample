@@ -79,6 +79,30 @@ podman run --rm -t \
     printf "Step 4: COBOL4J unload -> line sequential\n"; \
     "$COBOL4J_BIN" unload "$WORK_DIR/sqlite/indexed.db" "$WORK_DIR/sqlite/from_cobol4j.txt"; \
     \
+    printf "Step 5: line sequential -> VBISAM indexed (Go)\n"; \
+    export LD_LIBRARY_PATH="/work/extfh/zig-out/lib:$LD_LIBRARY_PATH"; \
+    GO_BASE="$WORK_DIR/go_vbisam/poc_vbisam"; \
+    GO_IN="$WORK_DIR/go_vbisam/input.txt"; \
+    GO_OUT="$WORK_DIR/go_vbisam/output.txt"; \
+    mkdir -p "$WORK_DIR/go_vbisam"; \
+    cp "$WORK_DIR/vbisam/input.txt" "$GO_IN"; \
+    cd /work/extfh/go-vbisam; \
+    go run . write-text "$GO_IN" "$GO_BASE"; \
+    go run . read-text "$GO_BASE" "$GO_OUT"; \
+    \
+    printf "Verifying Go output...\n"; \
+    if cmp -s "$GO_IN" "$GO_OUT"; then \
+      go_match=true; \
+      go_diff=""; \
+    else \
+      go_match=false; \
+      go_diff=$(diff -u "$GO_IN" "$GO_OUT" | sed -n "1,12p" || true); \
+    fi; \
+    printf "go_match=%s\n" "$go_match"; \
+    if [ "$go_match" != "true" ] && [ -n "$go_diff" ]; then \
+      printf "go_diff_head:\\n%s\\n" "$go_diff"; \
+    fi; \
+    \
     printf "Verifying output...\n"; \
     in_file="$WORK_DIR/vbisam/input.txt"; \
     out_raw="$WORK_DIR/sqlite/from_cobol4j.txt"; \

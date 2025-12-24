@@ -17,6 +17,14 @@ export DYLD_LIBRARY_PATH=../zig-out/lib
 go run .
 ```
 
+3) Text -> VBISAM -> Text:
+```
+cd /Users/uemonmac/dev/__claude/__ziglibs/extfh/go-vbisam
+export DYLD_LIBRARY_PATH=../zig-out/lib
+go run . write-text ./work/input.txt ./work/poc_vbisam
+go run . read-text ./work/poc_vbisam ./work/output.txt
+```
+
 ## Notes
 - Records are fixed length (100 bytes).
 - Key is 10-byte ASCII at offset 0 (`PIC X(10)`).
