@@ -7,7 +7,9 @@ Pipeline:
 2) VBISAM indexed -> Line sequential (GnuCOBOL + EXTFH, extension .idx)
 3) Line sequential -> SQLite indexed (GnuCOBOL + EXTFH, extension .db)
 4) SQLite indexed -> Line sequential (COBOL4J cobj-idx unload)
-5) Compare input and output (20 records)
+5) Line sequential -> VBISAM indexed (Go + EXTFH)
+6) VBISAM indexed -> Line sequential (Go + EXTFH)
+7) Compare input and output (20 records)
 
 Notes:
 - EXTFH is built with `-Dbackend=both` and chooses the backend by file extension.
