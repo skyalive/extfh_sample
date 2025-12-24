@@ -4,10 +4,10 @@
 >
 > | Component | Status | Files |
 > |-----------|--------|-------|
-> | EXTFH Interface | Implemented | `src/runtime/extfh.zig` (23KB) |
-> | VBISAM Wrapper | Implemented | `src/runtime/vbisam.zig` (22KB) |
-> | ISAM Abstraction Layer | Phase 1 Complete | `src/runtime/isam_interface.zig`, `isam_vbisam.zig` |
-> | KSDS Support | Implemented | `src/runtime/vbisam.zig` |
+> | EXTFH Interface | Implemented | `extfh/src/extfh.zig` |
+> | VBISAM Wrapper | Implemented | `extfh/src/vbisam.zig` |
+> | ISAM Abstraction Layer | Phase 1 Complete | `extfh/src/isam_interface.zig`, `extfh/src/isam_vbisam.zig` |
+> | KSDS Support | Implemented | `extfh/src/vbisam.zig` |
 > | RRDS Support | Planning | - |
 > | ESDS Support | Planning | - |
 
@@ -1016,4 +1016,3 @@ For implementation details, API documentation, and developer guide, refer to [sp
 |---------|------|--------|-------|
 | 1.1 | 2025-12-18 | Updated | Added Abstraction Layer Phase 1 |
 | 1.0 | 2025-12-11 | Draft | Initial EXTFH specification |
-

@@ -1,0 +1,21 @@
+commit 8a1e7bd092f9db6cc527719f8e574cf228ae0149
+Author: skyalive <uemon2010@gmail.com>
+Date:   Wed Dec 24 09:51:22 2025 +0900
+
+    Fix keydesc footer check for unsigned char
+
+diff --git a/libvbisam/isopen.c b/extfh/lib/vbisam-osscons-patch-main/libvbisam/isopen.c
+index 1b05ceab..6cb7a1f6 100755
+--- a/libvbisam/isopen.c
++++ b/libvbisam/isopen.c
+@@ -428,8 +428,8 @@ isopen (const char *pcfilename, int imode)
+ 			goto open_err;
+ 		}
+ 		pctemp = cvbnodetmp;
+-		if (*(cvbnodetmp + psvbptr->inodesize - 3) != -1
+-		    || *(cvbnodetmp + psvbptr->inodesize - 2) != 0x7e) {
++		if ((unsigned char)*(cvbnodetmp + psvbptr->inodesize - 3) != 0xff
++		    || (unsigned char)*(cvbnodetmp + psvbptr->inodesize - 2) != 0x7e) {
+ 			goto open_err;
+ 		}
+ 		ilengthused = inl_ldint (pctemp);

@@ -33,12 +33,6 @@ export LD_LIBRARY_PATH="$ZIG_OUT:$LD_LIBRARY_PATH"
 
 echo "--- Directory Content ---"
 ls -la
-echo "--- debug_extfh.txt Content ---"
-if [ -f debug_extfh.txt ]; then
-    cat debug_extfh.txt
-else
-    echo "debug_extfh.txt NOT FOUND"
-fi
 echo "--- seqfile.txt Content ---"
 if [ -f seqfile.txt ]; then
     cat seqfile.txt

@@ -56,15 +56,78 @@
                DISPLAY "Error writing record: " WS-STATUS
            END-IF.
 
+           MOVE 23456 TO TEST-KEY.
+           MOVE "Second Record" TO TEST-DATA.
+           WRITE TEST-RECORD.
+           IF WS-STATUS = "00"
+               DISPLAY "Second record written successfully"
+           ELSE
+               DISPLAY "Error writing second record: " WS-STATUS
+           END-IF.
+
+           MOVE 12345 TO TEST-KEY.
+           MOVE "Dup Record" TO TEST-DATA.
+           WRITE TEST-RECORD.
+           IF WS-STATUS = "00"
+               DISPLAY "Unexpected duplicate write success"
+           ELSE
+               DISPLAY "Duplicate write status: " WS-STATUS
+           END-IF.
+
+           MOVE "Hello Rewrite" TO TEST-DATA.
+           REWRITE TEST-RECORD.
+           IF WS-STATUS = "00"
+               DISPLAY "Record rewritten successfully"
+           ELSE
+               DISPLAY "Error rewriting record: " WS-STATUS
+           END-IF.
+
            CLOSE TEST-FILE.
 
            OPEN INPUT TEST-FILE.
            MOVE 12345 TO TEST-KEY.
+           START TEST-FILE KEY >= TEST-KEY
+               INVALID KEY
+                   DISPLAY "Error starting read: " WS-STATUS
+               NOT INVALID KEY
+                   READ TEST-FILE NEXT
+                   IF WS-STATUS = "00"
+                       STRING
+                           "Read Next: Key=" DELIMITED BY SIZE
+                           TEST-KEY DELIMITED BY SIZE
+                           " Data=" DELIMITED BY SIZE
+                           TEST-DATA DELIMITED BY SIZE
+                           INTO WS-DISPLAY-MSG
+                       END-STRING
+                       DISPLAY WS-DISPLAY-MSG
+                   ELSE
+                       DISPLAY "Error reading next: " WS-STATUS
+                   END-IF
+           END-START.
            READ TEST-FILE RECORD KEY IS TEST-KEY.
            IF WS-STATUS = "00"
-               DISPLAY "Read Record: Key=" TEST-KEY " Data=" TEST-DATA
+               STRING
+                   "Read Record: Key=" DELIMITED BY SIZE
+                   TEST-KEY DELIMITED BY SIZE
+                   " Data=" DELIMITED BY SIZE
+                   TEST-DATA DELIMITED BY SIZE
+                   INTO WS-DISPLAY-MSG
+               END-STRING
+               DISPLAY WS-DISPLAY-MSG
            ELSE
                DISPLAY "Error reading record: " WS-STATUS
+           END-IF.
+           DELETE TEST-FILE.
+           IF WS-STATUS = "00"
+               DISPLAY "Record deleted successfully"
+           ELSE
+               DISPLAY "Error deleting record: " WS-STATUS
+           END-IF.
+           READ TEST-FILE RECORD KEY IS TEST-KEY.
+           IF WS-STATUS = "00"
+               DISPLAY "Unexpected read after delete"
+           ELSE
+               DISPLAY "Read after delete status: " WS-STATUS
            END-IF.
            CLOSE TEST-FILE.
        END-INDEXED.

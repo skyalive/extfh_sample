@@ -23,63 +23,99 @@ The system consists of the following components:
 
 ### `czippfh`
 
-The main entry point is:
+The main entry point follows the GnuCOBOL EXTFH signature:
 
 ```c
-void czippfh(unsigned char *fcd_ptr);
+int czippfh(unsigned char *opcode, FCD3 *fcd);
 ```
 
-This function interprets the operation code in the FCD3 structure and dispatches it to the appropriate handler.
+`opcode` is a 2-byte operation code passed by the COBOL runtime. The handler dispatches based on
+`opcode` and uses `FCD3` for parameters and status.
 
 ### FCD3 Structure
 
 The File Control Descriptor (FCD3) is used to pass parameters between GnuCOBOL and EXTFH.
 
+This project targets the official GnuCOBOL FCD3 layout (see `extfh/include/gnucobol_common.h`).
+Only the subset required for current operations is read.
+
 | Field | Type | Description |
 |---|---|---|
-| `call_id` | `c_int` | Operation Code (1=OPEN, 2=CLOSE, 3=READ, 4=WRITE, ...) |
-| `handle` | `c_int` | File Handle (assigned by EXTFH on OPEN) |
-| `status` | `c_short` | Status Code (0=Success, 1=Not Found, etc.) |
-| `filename` | `[256]u8` | Filename string |
-| `file_open_mode`| `c_short` | 0=INPUT, 1=OUTPUT, 2=I-O, 3=EXTEND |
-| `record_varying`| `c_short` | Variable length flag |
-| `record_size` | `c_int` | Record size in bytes |
-| `record_key_pos`| `c_int` | Key position (for INDEXED) |
-| `record_key_size`| `c_int` | Key size (for INDEXED) |
-| `record_ptr` | `*c_void` | Pointer to data buffer |
-| `key_ptr` | `*c_void` | Pointer to key buffer |
-| `option` | `c_short` | Read mode (NEXT, PREV, etc.) |
-| `key_number` | `c_short` | Key index (0=Primary) |
+| `fileStatus` | `u8[2]` | COBOL file status digits |
+| `openMode` | `u8` | 0=INPUT, 1=OUTPUT, 2=I-O, 3=EXTEND |
+| `fnameLen` | `u8[2]` | Filename length (COMP-X) |
+| `_fnamePtr` | pointer | Filename buffer |
+| `curRecLen` | `u8[4]` | Current record length (COMP-X) |
+| `maxRecLen` | `u8[4]` | Max record length (COMP-X) |
+| `_recPtr` | pointer | Record buffer |
+| `_kdbPtr` | pointer | Key definition block (KDB) |
+| `_fileHandle` | pointer | Back-end handle storage |
 
 ## Supported Operations
 
-### OPEN (`call_id = 1`)
+Operations are selected by the 16-bit `opcode` provided by GnuCOBOL.
+
+### Opcode Reference (official)
+
+Defined in both current (`repo/gnucobol-osscons-patch/libcob/common.h:2473`) and next
+(`repo/gnucobol-3.3-dev/gnucobol-3.3-dev/libcob/common.h:2514`) releases.
+
+**Subset used by this project (official values):**
+- `0xFA00` OP_OPEN_INPUT
+- `0xFA01` OP_OPEN_OUTPUT
+- `0xFA02` OP_OPEN_IO
+- `0xFA03` OP_OPEN_EXTEND
+- `0xFA80` OP_CLOSE
+- `0xFAF5` OP_READ_SEQ
+- `0xFAF9` OP_READ_PREV
+- `0xFAF6` OP_READ_RAN
+- `0xFAC9` OP_READ_DIR
+- `0xFAF1` OP_READ_POSITION
+- `0xFAF3` OP_WRITE
+- `0xFAF4` OP_REWRITE
+- `0xFAF7` OP_DELETE
+- `0xFAE8` OP_START_EQ
+- `0xFAEB` OP_START_GE
+- `0xFAEA` OP_START_GT
+- `0xFA0E` OP_UNLOCK
+- `0x000F` OP_UNLOCK_REC
+
+### Unsupported Opcode Handling
+
+- If `opcode` is not recognized, EXTFH returns status `9` (Unknown Operation) and leaves the file state unchanged.
+- If `opcode` is recognized but the operation is not supported for the current file type (e.g., REWRITE on SEQUENTIAL),
+  EXTFH returns status `5` (I/O error / unsupported).
+
+### OPEN (`OP_OPEN_*`)
 Opens a file. Detects file type based on extension or creates new one.
 - **INDEXED**: `.isam`, `.idx`, `.ksds`, `.vsam`
 - **SEQUENTIAL**: All others (default)
+- **INDEXED filename normalization**: if the requested name ends in `.isam`, EXTFH strips the extension
+  and uses the base name for VBISAM (`{base}.dat` / `{base}.idx`).
+- **OUTPUT/EXTEND (INDEXED)**: the existing `{base}.dat` / `{base}.idx` files are removed before create.
 
-### CLOSE (`call_id = 2`)
+### CLOSE (`OP_CLOSE`)
 Closes the file and releases resources.
 
-### READ (`call_id = 3`)
+### READ (`OP_READ_*`)
 Reads a record.
 - **INDEXED**: Supports RANDOM (by key), SEQUENTIAL (NEXT/PREV/etc).
 - **SEQUENTIAL**: Supports sequential read only.
 
-### WRITE (`call_id = 4`)
+### WRITE (`OP_WRITE`)
 Writes a new record.
 
-### REWRITE (`call_id = 5`)
+### REWRITE (`OP_REWRITE`)
 Updates an existing record. Supported for INDEXED only.
 
-### DELETE (`call_id = 6`)
+### DELETE (`OP_DELETE`)
 Deletes a record. Supported for INDEXED only.
 
-### START (`call_id = 7`)
+### START (`OP_START_*`)
 Positions the cursor for sequential reading. Supported for INDEXED only.
 
-### UNLOCK (`call_id = 10`)
-Releases locks.
+### UNLOCK (`OP_UNLOCK`/`OP_UNLOCK_REC`)
+Releases locks. Both file unlock (`OP_UNLOCK`) and record unlock (`OP_UNLOCK_REC`) are mapped to unlock.
 
 ## Error Handling
 
@@ -92,6 +128,11 @@ Errors are returned via the `status` field in FCD3.
 - `4`: End of File / No Record
 - `5`: I/O Error / General Error
 - `9`: Unknown Operation
+
+## Related Specs
+
+- `extfh/spec/gnucobol_extfh_opcode_diff.md` (official opcode list and delta vs local implementation)
+- `extfh/spec/vbisam_isopen_footer_bug.md` (VBISAM unsigned-char footer issue report)
 
 ## Compilation & Usage
 

@@ -15,7 +15,10 @@ pub fn build(b: *std.Build) void {
     vbisam_mod.addIncludePath(b.path("lib/vbisam-osscons-patch-main/libvbisam"));
     vbisam_mod.link_libc = true;
     
-    const c_flags = &[_][]const u8{ "-D_GNU_SOURCE" };
+    const c_flags = &[_][]const u8{
+        "-D_GNU_SOURCE",
+        "-fno-sanitize=alignment",
+    };
     const vbisam_sources = &[_][]const u8{
         "lib/vbisam-osscons-patch-main/libvbisam/isaudit.c",
         "lib/vbisam-osscons-patch-main/libvbisam/isbuild.c",

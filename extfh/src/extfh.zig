@@ -55,10 +55,11 @@ const Opcode = enum(u16) {
     OP_READ_POSITION = 0xFAF1,
     OP_WRITE = 0xFAF3,
     OP_REWRITE = 0xFAF4,
-    OP_DELETE = 0xFAF2,
+    OP_DELETE = 0xFAF7,
     OP_START_EQ = 0xFAE8,
     OP_START_GE = 0xFAEB,
     OP_START_GT = 0xFAEA,
+    OP_UNLOCK = 0xFA0E,
     OP_UNLOCK_REC = 0x000F,
 };
 
@@ -151,7 +152,9 @@ fn opcodeToCall(opcode: u16, out: *FCD3) void {
             out.call_id = 7;
             out.option = 6; // GTEQ
         },
-        @intFromEnum(Opcode.OP_UNLOCK_REC) => out.call_id = 10,
+        @intFromEnum(Opcode.OP_UNLOCK),
+        @intFromEnum(Opcode.OP_UNLOCK_REC),
+        => out.call_id = 10,
         else => {},
     }
 }
@@ -236,10 +239,8 @@ pub fn deinit() void {
 /// Main EXTFH handler - called by GnuCOBOL for all I-O operations
 pub export fn czippfh(opcode_ptr: [*c]u8, fcd_ptr: *cob.FCD3) callconv(.c) void {
     if (!initialized) {
-        // Lazy initialization with default allocator
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-        defer _ = gpa.deinit();
-        init(gpa.allocator()) catch {
+        // Lazy initialization with a stable allocator for runtime use
+        init(std.heap.c_allocator) catch {
             // Can't initialize - set error status
             return;
         };
@@ -247,20 +248,6 @@ pub export fn czippfh(opcode_ptr: [*c]u8, fcd_ptr: *cob.FCD3) callconv(.c) void 
 
     var fcd: FCD3 = undefined;
     @memset(&fcd.filename, 0);
-
-    if (std.fs.cwd().createFile("debug_extfh.txt", .{ .truncate = false }) catch null) |dbg_file| {
-        defer dbg_file.close();
-        dbg_file.seekFromEnd(0) catch {};
-        if (opcode_ptr) |ptr| {
-            const b0 = ptr[0];
-            const b1 = ptr[1];
-            var msg_buf: [128]u8 = undefined;
-            const msg = std.fmt.bufPrint(&msg_buf, "CALL opcode bytes={d},{d}\n", .{ b0, b1 }) catch "CALL log failed\n";
-            dbg_file.writeAll(msg) catch {};
-        } else {
-            dbg_file.writeAll("CALL opcode is null\n") catch {};
-        }
-    }
 
     if (opcode_ptr == null) return;
     const opcode = readCompX2(@ptrCast(opcode_ptr));
@@ -295,7 +282,17 @@ pub export fn czippfh(opcode_ptr: [*c]u8, fcd_ptr: *cob.FCD3) callconv(.c) void 
 
     if (fcd_ptr._recPtr.ptr_name) |rec_ptr| {
         fcd.record_ptr = rec_ptr;
-        fcd.key_ptr = rec_ptr;
+        if (fcd.record_key_size > 0 and fcd.record_key_pos >= 0) {
+            const pos: usize = @intCast(fcd.record_key_pos);
+            const size: usize = @intCast(fcd.record_key_size);
+            if (pos + size <= @as(usize, @intCast(fcd.record_size))) {
+                fcd.key_ptr = rec_ptr + pos;
+            } else {
+                fcd.key_ptr = rec_ptr;
+            }
+        } else {
+            fcd.key_ptr = rec_ptr;
+        }
     } else {
         fcd.record_ptr = null;
         fcd.key_ptr = null;
@@ -305,21 +302,6 @@ pub export fn czippfh(opcode_ptr: [*c]u8, fcd_ptr: *cob.FCD3) callconv(.c) void 
         fcd.handle = @intCast(@intFromPtr(handle_ptr));
     } else {
         fcd.handle = 0;
-    }
-
-    if (std.fs.cwd().createFile("debug_extfh.txt", .{ .truncate = false }) catch null) |dbg_file| {
-        defer dbg_file.close();
-        dbg_file.seekFromEnd(0) catch {};
-        const fname_len = readCompX2(&fcd_ptr.fnameLen);
-        const rec_ptr_val: usize = if (fcd_ptr._recPtr.ptr_name) |p| @intFromPtr(p) else 0;
-        const kdb_ptr_val: usize = if (fcd_ptr._kdbPtr.ptr_name) |p| @intFromPtr(p) else 0;
-        var msg_buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(
-            &msg_buf,
-            "MAP call_id={} open_mode={} rec_size={} key_pos={} key_size={} fname_len={} rec_ptr=0x{x} kdb_ptr=0x{x}\n",
-            .{ fcd.call_id, fcd.file_open_mode, fcd.record_size, fcd.record_key_pos, fcd.record_key_size, fname_len, rec_ptr_val, kdb_ptr_val },
-        ) catch "MAP log failed\n";
-        dbg_file.writeAll(msg) catch {};
     }
 
     // Dispatch to appropriate handler based on operation code
@@ -352,36 +334,30 @@ fn handleOpen(fcd: *FCD3) void {
         return;
     };
 
-    if (std.fs.cwd().createFile("debug_extfh.txt", .{ .truncate = false }) catch null) |dbg_file| {
-        defer dbg_file.close();
-        dbg_file.seekFromEnd(0) catch {};
-        dbg_file.writeAll("ENTER handleOpen\n") catch {};
+    if (!handle_table_mutex.tryLock()) {
+        fcd.status = 2; // Locked
+        return;
     }
-
-    handle_table_mutex.lock();
     defer handle_table_mutex.unlock();
 
     // Extract filename (null-terminated string from FCD3)
     const filename_str = std.mem.sliceTo(&fcd.filename, 0);
-    const filename = alloc.dupe(u8, filename_str) catch {
+    var filename = alloc.dupe(u8, filename_str) catch {
         fcd.status = 5;
         return;
     };
 
-    if (std.fs.cwd().createFile("debug_extfh.txt", .{ .truncate = false }) catch null) |dbg_file| {
-        defer dbg_file.close();
-        dbg_file.seekFromEnd(0) catch {};
-        var msg_buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(
-            &msg_buf,
-            "OPEN name='{s}' mode={} rec_size={} key_pos={} key_size={}\n",
-            .{ filename_str, fcd.file_open_mode, fcd.record_size, fcd.record_key_pos, fcd.record_key_size },
-        ) catch "OPEN log failed\n";
-        dbg_file.writeAll(msg) catch {};
-    }
-
     // Detect file type based on extension
     const file_type = detectFileType(filename, fcd.file_open_mode == 1);
+    if (file_type == .INDEXED and std.mem.endsWith(u8, filename, ".isam")) {
+        const base = alloc.dupe(u8, filename[0 .. filename.len - 5]) catch {
+            alloc.free(filename);
+            fcd.status = 5;
+            return;
+        };
+        alloc.free(filename);
+        filename = base;
+    }
 
     // Route to appropriate handler based on file type
     switch (file_type) {

@@ -37,6 +37,8 @@ pub const FileLockMode = enum(c_int) {
     EXCLUSIVE = 0x800,
 };
 
+const ISNOLOG: c_int = 0x8;
+
 pub const KeyType = enum(c_short) {
     CHAR = 0,
     INT = 1,
@@ -91,19 +93,7 @@ pub const KeyDesc = extern struct {
     k_nparts: c_short,
     k_part: [8]KeyDescBuilder.KeyPart,
     k_len: c_short,
-    k_rootnode: c_int, // vbisam_off_t is int or long long based on define. wrapper assumes default (often int or check system)
-                       // vbisam.h defines vbisam_off_t as int unless VBISAM_USE_LONG_LONG is defined.
-                       // We will assume 'int' for now, but safer to use c_longlong if unsure.
-                       // Looking at vbisam.h: #define vbisam_off_t int (unless defined)
-                       // We will use c_longlong to be safe or check build flags.
-                       // Let's use c_longlong to align with typical 64-bit systems or if forced.
-                       // Actually, let's use c_long for generic approach or match the C definition.
-                       // In build.zig I won't define VBISAM_USE_LONG_LONG unless necessary.
-                       // Let's stick to c_int if that's the default.
-                       // Wait, vbisam.h says:
-                       // #ifdef VBISAM_USE_LONG_LONG -> long long
-                       // #else -> int
-                       // If I don't define it, it is int.
+    k_rootnode: c_longlong, // vbisam_off_t uses long long when VBISAM_USE_LONG_LONG is enabled in vbisam.h
 };
 
 // C API
@@ -169,30 +159,21 @@ pub const IsamFile = struct {
     }
 
     pub fn build(allocator: std.mem.Allocator, filename: []const u8, record_size: usize, key_desc: KeyDesc, mode: OpenMode, lock: FileLockMode, var_len: bool) VbisamError!IsamFile {
-        _ = lock;
-        
         const filename_c = allocator.dupeZ(u8, filename) catch return error.MemoryError;
         defer allocator.free(filename_c);
 
-        var kd = key_desc; // Copy to mutable for pointer
+        const kd_buf = allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(8), @sizeOf(KeyDesc)) catch return error.MemoryError;
+        defer allocator.free(kd_buf);
+        const kd: *KeyDesc = @ptrCast(@alignCast(kd_buf.ptr));
+        kd.* = key_desc;
         var c_mode = @intFromEnum(mode);
+        c_mode |= @intFromEnum(lock);
+        c_mode |= ISNOLOG;
         if (var_len) {
             c_mode |= 0x10; // ISVARLEN
         }
 
-        if (std.fs.cwd().createFile("debug_extfh.txt", .{ .truncate = false }) catch null) |dbg_file| {
-            defer dbg_file.close();
-            dbg_file.seekFromEnd(0) catch {};
-            var msg_buf: [192]u8 = undefined;
-            const msg = std.fmt.bufPrint(
-                &msg_buf,
-                "VBISAM isbuild rec_size={} k_nparts={} k_len={} kd_addr=0x{x}\n",
-                .{ record_size, kd.k_nparts, kd.k_len, @intFromPtr(&kd) },
-            ) catch "VBISAM log failed\n";
-            dbg_file.writeAll(msg) catch {};
-        }
-
-        const handle = isbuild(filename_c, @intCast(record_size), &kd, c_mode);
+        const handle = isbuild(filename_c, @intCast(record_size), kd, c_mode);
         if (handle < 0) {
             return mapIsErrno();
         }
@@ -240,8 +221,11 @@ pub const IsamFile = struct {
     }
 
     pub fn start(self: *IsamFile, key_desc: KeyDesc, length: usize, key: []u8, mode: ReadMode) VbisamError!void {
-        var kd = key_desc;
-        const ret = isstart(self.handle, &kd, @intCast(length), key.ptr, @intFromEnum(mode));
+        const kd_buf = self.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(8), @sizeOf(KeyDesc)) catch return error.MemoryError;
+        defer self.allocator.free(kd_buf);
+        const kd: *KeyDesc = @ptrCast(@alignCast(kd_buf.ptr));
+        kd.* = key_desc;
+        const ret = isstart(self.handle, kd, @intCast(length), key.ptr, @intFromEnum(mode));
         if (ret < 0) {
             return mapIsErrno();
         }

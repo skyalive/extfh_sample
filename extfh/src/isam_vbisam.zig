@@ -135,13 +135,12 @@ pub const VbisamBackend = struct {
 
     /// キー位置に移動
     pub fn start(self: *VbisamBackend, handle: isam.IsamFileHandle, key: []const u8, mode: isam.ReadMode) isam.IsamError!void {
-        _ = self;
         const vb_mode = mapReadMode(mode);
 
         var vb_file = vbisam.IsamFile{
             .handle = handle.handle,
             .record_size = handle.record_size,
-            .allocator = undefined,
+            .allocator = self.allocator,
         };
 
         // Build key descriptor for START operation
@@ -175,7 +174,19 @@ pub const VbisamBackend = struct {
 
     /// 新規ファイルを作成（OUTPUT/EXTEND モード用）
     pub fn create(self: *VbisamBackend, filename: []const u8, mode: isam.OpenMode, record_size: usize, key_offset: usize, key_size: usize) isam.IsamError!isam.IsamFileHandle {
-        const vb_mode = mapOpenMode(mode);
+        const vb_mode = switch (mode) {
+            .OUTPUT, .EXTEND => vbisam.OpenMode.INOUT,
+            else => mapOpenMode(mode),
+        };
+
+        if (mode == .OUTPUT) {
+            const data_path = std.fmt.allocPrint(self.allocator, "{s}.dat", .{filename}) catch return isam.IsamError.IoError;
+            defer self.allocator.free(data_path);
+            const index_path = std.fmt.allocPrint(self.allocator, "{s}.idx", .{filename}) catch return isam.IsamError.IoError;
+            defer self.allocator.free(index_path);
+            std.fs.cwd().deleteFile(data_path) catch {};
+            std.fs.cwd().deleteFile(index_path) catch {};
+        }
 
         // KeyDescBuilder を使用してキー記述子を構築
         var key_builder = vbisam.KeyDescBuilder.init();
@@ -188,7 +199,7 @@ pub const VbisamBackend = struct {
             record_size,
             key_desc,
             vb_mode,
-            vbisam.FileLockMode.NONE,
+            vbisam.FileLockMode.EXCLUSIVE,
             false,  // variable length
         ) catch |err| {
             return mapError(err);
