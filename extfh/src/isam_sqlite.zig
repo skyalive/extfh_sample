@@ -14,6 +14,8 @@ pub const SqliteBackend = struct {
     db: ?*sqlite3.sqlite3,
     db_path: []const u8,
     current_key: ?[]u8,
+    session_id: []const u8,
+    process_id: []const u8,
     open_mode: isam.OpenMode,
     record_size: usize,
     key_offset: usize,
@@ -21,11 +23,16 @@ pub const SqliteBackend = struct {
 
     /// Initialize SQLite backend
     pub fn init(allocator: std.mem.Allocator, db_path: []const u8) !Self {
+        const pid = std.c.getpid();
+        const session_id = try std.fmt.allocPrint(allocator, "{d}-{d}", .{ pid, std.time.milliTimestamp() });
+        const process_id = try std.fmt.allocPrint(allocator, "{d}", .{pid});
         var self = Self{
             .allocator = allocator,
             .db = null,
             .db_path = try allocator.dupe(u8, db_path),
             .current_key = null,
+            .session_id = session_id,
+            .process_id = process_id,
             .open_mode = .INPUT,
             .record_size = 0,
             .key_offset = 0,
@@ -42,6 +49,8 @@ pub const SqliteBackend = struct {
             self.allocator.free(key);
         }
         self.allocator.free(self.db_path);
+        self.allocator.free(self.session_id);
+        self.allocator.free(self.process_id);
     }
 
     /// Open a SQLite-based INDEXED file
@@ -250,14 +259,51 @@ pub const SqliteBackend = struct {
         return error.IoError;
     }
 
-    /// Lock a file/record
-    pub fn lock(_: *Self, _: isam.IsamFileHandle, _: isam.LockMode) isam.IsamError!void {
-        // SQLite handles locking at transaction level
+    pub fn lock(self: *Self, _: isam.IsamFileHandle, _: isam.LockMode) isam.IsamError!void {
+        if (self.db == null) return error.IoError;
+
+        const db = self.db.?;
+        const sql = "INSERT INTO file_lock (file_id, locked_by, process_id, locked_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)";
+
+        var stmt: ?*sqlite3.sqlite3_stmt = null;
+        var rc = sqlite3.sqlite3_prepare_v2(db, @ptrCast(sql.ptr), @intCast(sql.len), &stmt, null);
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
+        defer _ = sqlite3.sqlite3_finalize(stmt.?);
+
+        rc = sqlite3.sqlite3_bind_text(stmt.?, 1, @ptrCast(self.db_path.ptr), @intCast(self.db_path.len), sqlite3.SQLITE_STATIC);
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
+
+        rc = sqlite3.sqlite3_bind_text(stmt.?, 2, @ptrCast(self.session_id.ptr), @intCast(self.session_id.len), sqlite3.SQLITE_STATIC);
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
+
+        rc = sqlite3.sqlite3_bind_text(stmt.?, 3, @ptrCast(self.process_id.ptr), @intCast(self.process_id.len), sqlite3.SQLITE_STATIC);
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
+
+        rc = sqlite3.sqlite3_step(stmt.?);
+        if (rc == sqlite3.SQLITE_CONSTRAINT or rc == sqlite3.SQLITE_BUSY) return error.Locked;
+        if (rc != sqlite3.SQLITE_DONE) return error.IoError;
     }
 
     /// Unlock a file/record
-    pub fn unlock(_: *Self, _: isam.IsamFileHandle) isam.IsamError!void {
-        // SQLite releases locks automatically
+    pub fn unlock(self: *Self, _: isam.IsamFileHandle) isam.IsamError!void {
+        if (self.db == null) return error.IoError;
+
+        const db = self.db.?;
+        const sql = "DELETE FROM file_lock WHERE file_id = ? AND locked_by = ?";
+
+        var stmt: ?*sqlite3.sqlite3_stmt = null;
+        var rc = sqlite3.sqlite3_prepare_v2(db, @ptrCast(sql.ptr), @intCast(sql.len), &stmt, null);
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
+        defer _ = sqlite3.sqlite3_finalize(stmt.?);
+
+        rc = sqlite3.sqlite3_bind_text(stmt.?, 1, @ptrCast(self.db_path.ptr), @intCast(self.db_path.len), sqlite3.SQLITE_STATIC);
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
+
+        rc = sqlite3.sqlite3_bind_text(stmt.?, 2, @ptrCast(self.session_id.ptr), @intCast(self.session_id.len), sqlite3.SQLITE_STATIC);
+        if (rc != sqlite3.SQLITE_OK) return error.IoError;
+
+        rc = sqlite3.sqlite3_step(stmt.?);
+        if (rc != sqlite3.SQLITE_DONE) return error.IoError;
     }
 
     /// Create a new INDEXED file
@@ -356,4 +402,22 @@ test "SqliteBackend: create and write" {
     const handle = try backend.create("/tmp/test_create.db", .OUTPUT, 100, 0, 10);
     try testing.expectEqual(@as(usize, 100), handle.record_size);
     try testing.expectEqual(@as(usize, 10), handle.key_size);
+}
+
+test "SqliteBackend: file lock" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var backend_a = try SqliteBackend.init(allocator, "/tmp/test_lock.db");
+    defer backend_a.deinit();
+    const handle_a = try backend_a.create("/tmp/test_lock.db", .OUTPUT, 64, 0, 8);
+    try backend_a.lock(handle_a, .EXCLUSIVE);
+
+    var backend_b = try SqliteBackend.init(allocator, "/tmp/test_lock.db");
+    defer backend_b.deinit();
+    const handle_b = try backend_b.open("/tmp/test_lock.db", .IO);
+    try testing.expectError(error.Locked, backend_b.lock(handle_b, .EXCLUSIVE));
+
+    try backend_a.unlock(handle_a);
 }
